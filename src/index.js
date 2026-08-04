@@ -21,10 +21,11 @@
 
 // --- Game -----------------------------------------------------------------
 export { FogChess, initialBoard, boardToUnits } from './FogChess.js';
+export { playMatch } from './playMatch.js';
 
 // --- Agents ---------------------------------------------------------------
 export {
-  ChessObscuroAgent, ObscuroAgent,
+  ChessObscuroAgent, ObscuroAgent, setGame, getGame,
   obscuroStrategy, analyzeObscuro, analyzeObscuroProgressive, cpSumsOverWorlds,
   makeChessLeafEval, makeIterativeChessLeafEval,
   getLeafEvalStats, resetLeafEvalStats,
