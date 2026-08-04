@@ -5,7 +5,7 @@ chess AI ships a strong engine with **no install required**.
 
 - `sf18-lite-single.cjs`  — Stockfish 18 "lite", **single-threaded** WASM build
   (Emscripten loader). Renamed from the upstream `stockfish-18-lite-single.js`
-  to `.cjs` only because this repo is `"type":"module"`; the file contents are
+  to `.cjs` only because this package is `"type":"module"`; the file contents are
   unmodified CommonJS.
 - `sf18-lite-single.wasm` — the companion WebAssembly binary (7.3 MB)
 
@@ -18,7 +18,7 @@ chess AI ships a strong engine with **no install required**.
 GPL. If you distribute this project with these files included, the GPL's terms
 apply to that distribution.
 
-Loaded in Node by [`../stockfish.js`](../stockfish.js); used as the
+Loaded in Node by [`src/stockfish.js`](../../src/stockfish.js); used as the
 perfect-information move picker and as the Obscuro search's leaf evaluator, with
 automatic fallback to the built-in JS search if these files are absent or fail
 to load.
@@ -66,6 +66,9 @@ touching [`sf-worker.cjs`](sf-worker.cjs). Both fail *silently* — as
    back resolves *before* the engine will accept commands, so `_isReady` has to
    be polled. Both mirror the upstream `stockfish/index.js` loader.
 
-`sf-cache.{sqlite,ndjson}` keys are namespaced by engine (`ENGINE_TAG` in
-[`../stockfish.js`](../stockfish.js)), so cached SF11 evaluations can never be
-served as though this engine had produced them; they simply age out via the LRU.
+The evaluation cache (`sf-cache.{sqlite,ndjson}`) is written here by default, but
+it is derived data and is gitignored — an embedder with a warm cache of its own
+points `setCacheDir()`/`SF_CACHE_DIR` elsewhere. Its keys are namespaced by engine
+(`ENGINE_TAG` in [`src/stockfish.js`](../../src/stockfish.js)), so evaluations from
+an older engine can never be served as though this one had produced them; they
+simply age out via the LRU.
