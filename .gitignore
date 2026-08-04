@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+*.log
+
+# Stockfish evaluation cache — derived data, written next to the engine unless
+# SF_CACHE_DIR / setCacheDir() points elsewhere. It grows to tens of MB and is
+# reproducible by definition, so it never belongs in a commit.
+vendor/stockfish/sf-cache.*

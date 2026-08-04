@@ -1,0 +1,3 @@
+[submodule "vendor/obscuro"]
+	path = vendor/obscuro
+	url = https://github.com/opowell/obscuro-ai.git

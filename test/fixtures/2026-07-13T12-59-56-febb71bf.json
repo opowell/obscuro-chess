@@ -1,0 +1,481 @@
+{
+  "id": "febb71bf-df21-4ac8-9a29-5ffe54a65702",
+  "createdAt": "2026-07-13T10:59:56.446Z",
+  "game": "chess",
+  "fog": true,
+  "debugAI": true,
+  "params": {
+    "game": "chess",
+    "players": [
+      {
+        "id": "white",
+        "name": "You",
+        "agent": "human"
+      },
+      {
+        "id": "black",
+        "name": "CPU 1",
+        "agent": "obscuro"
+      }
+    ],
+    "config": {
+      "maxTurns": 300,
+      "fog": true,
+      "fogOfWar": true,
+      "debugAI": true,
+      "difficulty": 80,
+      "aiTimeMs": null,
+      "difficultyMode": "power",
+      "scenario": ""
+    }
+  },
+  "status": "active",
+  "result": null,
+  "log": [
+    {
+      "turnNumber": 1,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wPd",
+            "from": "d2",
+            "to": "d4",
+            "isDoublePush": true,
+            "gridFrom": [
+              3,
+              6
+            ],
+            "gridTo": [
+              3,
+              4
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 1,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bPf",
+            "from": "f7",
+            "to": "f6",
+            "gridFrom": [
+              5,
+              1
+            ],
+            "gridTo": [
+              5,
+              2
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 2,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wPe",
+            "from": "e2",
+            "to": "e4",
+            "isDoublePush": true,
+            "gridFrom": [
+              4,
+              6
+            ],
+            "gridTo": [
+              4,
+              4
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 2,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bPh",
+            "from": "h7",
+            "to": "h5",
+            "isDoublePush": true,
+            "gridFrom": [
+              7,
+              1
+            ],
+            "gridTo": [
+              7,
+              3
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 3,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wN",
+            "from": "b1",
+            "to": "c3",
+            "gridFrom": [
+              1,
+              7
+            ],
+            "gridTo": [
+              2,
+              5
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 3,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bN",
+            "from": "b8",
+            "to": "a6",
+            "gridFrom": [
+              1,
+              0
+            ],
+            "gridTo": [
+              0,
+              2
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 4,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wB",
+            "from": "c1",
+            "to": "f4",
+            "gridFrom": [
+              2,
+              7
+            ],
+            "gridTo": [
+              5,
+              4
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 4,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bPe",
+            "from": "e7",
+            "to": "e5",
+            "isDoublePush": true,
+            "gridFrom": [
+              4,
+              1
+            ],
+            "gridTo": [
+              4,
+              3
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 5,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wPd",
+            "from": "d4",
+            "to": "e5",
+            "targetId": "bPe",
+            "isCapture": true,
+            "gridFrom": [
+              3,
+              4
+            ],
+            "gridTo": [
+              4,
+              3
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 5,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bPf",
+            "from": "f6",
+            "to": "f5",
+            "gridFrom": [
+              5,
+              2
+            ],
+            "gridTo": [
+              5,
+              3
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 6,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wPe",
+            "from": "e4",
+            "to": "f5",
+            "targetId": "bPf",
+            "isCapture": true,
+            "gridFrom": [
+              4,
+              4
+            ],
+            "gridTo": [
+              5,
+              3
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 6,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bPc",
+            "from": "c7",
+            "to": "c6",
+            "gridFrom": [
+              2,
+              1
+            ],
+            "gridTo": [
+              2,
+              2
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 7,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wN2",
+            "from": "g1",
+            "to": "f3",
+            "gridFrom": [
+              6,
+              7
+            ],
+            "gridTo": [
+              5,
+              5
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 7,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bPd",
+            "from": "d7",
+            "to": "d5",
+            "isDoublePush": true,
+            "gridFrom": [
+              3,
+              1
+            ],
+            "gridTo": [
+              3,
+              3
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 8,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wPd",
+            "from": "e5",
+            "to": "e6",
+            "gridFrom": [
+              4,
+              3
+            ],
+            "gridTo": [
+              4,
+              2
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 8,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bB",
+            "from": "c8",
+            "to": "e6",
+            "targetId": "wPd",
+            "isCapture": true,
+            "gridFrom": [
+              2,
+              0
+            ],
+            "gridTo": [
+              4,
+              2
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 9,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "white",
+          "action": {
+            "type": "move",
+            "unitId": "wPe",
+            "from": "f5",
+            "to": "e6",
+            "targetId": "bB",
+            "isCapture": true,
+            "gridFrom": [
+              5,
+              3
+            ],
+            "gridTo": [
+              4,
+              2
+            ]
+          }
+        }
+      ],
+      "events": []
+    },
+    {
+      "turnNumber": 9,
+      "phase": "action",
+      "playerActions": [
+        {
+          "playerId": "black",
+          "action": {
+            "type": "move",
+            "unitId": "bK",
+            "from": "e8",
+            "to": "f7",
+            "gridFrom": [
+              4,
+              0
+            ],
+            "gridTo": [
+              5,
+              1
+            ]
+          }
+        }
+      ],
+      "events": []
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "name": "obscuro-chess",
+  "version": "1.0.0",
+  "description": "A fog-of-war chess AI: the Obscuro equilibrium search (vendored obscuro-ai) with a Stockfish leaf evaluator, an exact belief over every position still consistent with what a player has seen, and a fitted move prior over it.",
+  "type": "module",
+  "license": "MIT",
+  "author": "opowell",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opowell/obscuro-chess.git"
+  },
+  "homepage": "https://github.com/opowell/obscuro-chess#readme",
+  "bugs": {
+    "url": "https://github.com/opowell/obscuro-chess/issues"
+  },
+  "keywords": [
+    "chess",
+    "fog-of-war",
+    "dark-chess",
+    "game-ai",
+    "imperfect-information",
+    "counterfactual-regret-minimization",
+    "stockfish",
+    "belief-state"
+  ],
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./game": "./src/FogChess.js",
+    "./stockfish": "./src/stockfish.js",
+    "./vendor/stockfish/*": "./vendor/stockfish/*"
+  },
+  "files": [
+    "src",
+    "vendor/stockfish",
+    "vendor/obscuro/src",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "demo": "node examples/demo.js",
+    "calibrate": "node scripts/calibrate-belief.mjs",
+    "fit-prior": "node scripts/fit-move-prior.mjs",
+    "move-quality": "node scripts/move-quality.mjs",
+    "strength": "node scripts/strength-belief.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
