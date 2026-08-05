@@ -38,10 +38,19 @@ test('uciToAction maps moves, promotions and castling', () => {
 
 // Reach the position after 1. d4 Nf6 2. d5 (Black to move) — the exact spot
 // where the weak search blundered ...Nxd5?? (the pawn is defended by Qd1).
+//
+// difficulty 100 is load-bearing, not incidental. With perfect information the
+// agent picks by sampling MultiPV lines ∝ win-probability^beta, and beta is what
+// the dial slides (CHESS_DIAL.proportionalPick: ~1 at mid-dial, 12 at the top).
+// A mid-dial agent is therefore SUPPOSED to play a weaker move sometimes, so
+// asserting a specific move there is asserting on a coin flip — it failed in CI
+// on exactly one of three Node versions before this comment existed. At the top
+// of the dial the pick is effectively the engine's best move, which is what this
+// test is actually about: that the engine is wired up and being consulted.
 function blunderPosition() {
   let s = FogChess.createInitialState(
     [{ id: 'white', name: 'W', agent: { id: 'x' } }, { id: 'black', name: 'B', agent: { id: 'x' } }],
-    { fogOfWar: false, difficulty: 50 });
+    { fogOfWar: false, difficulty: 100 });
   for (const [pid, from, to] of [['white', 'd2', 'd4'], ['black', 'g8', 'f6'], ['white', 'd4', 'd5']]) {
     const a = FogChess.getLegalActions(s, pid).find(m => m.from === from && m.to === to);
     s = FogChess.applyActions(s, [{ playerId: pid, action: a }]);
