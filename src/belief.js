@@ -27,6 +27,7 @@
 
 import { FILES, fileIndex, rankOf, squareAt, getVisibleSquares, isAttackedBy } from './board.js';
 import { pseudoLegalForUnit } from './moves.js';
+import { param } from './config.js';
 
 const ALL_SQUARES = [];
 for (const f of FILES) for (let r = 1; r <= 8; r++) ALL_SQUARES.push(f + r);
@@ -110,6 +111,17 @@ export const RECAPTURE_TYPE_WEIGHT = { pawn: 9, knight: 3, bishop: 3, rook: 1.5,
 // giving up and accepting anything (see the two uses below).
 export const MAX_ATTEMPTS_PER_PARTICLE = 6;
 export const PHANTOM_CHECK_REJECT_WINDOW = 4;
+
+// Effective values — the constants above are the DEFAULTS; a settings file or
+// --set may pin any of them (docs/SETTINGS.md). Read through param() at use
+// time rather than captured here, so a host that configures the AI after this
+// module loaded still gets what it asked for.
+const maxPossible = () => param('chess.MAX_POSSIBLE', MAX_POSSIBLE);
+const threatBias = () => param('chess.THREAT_BIAS', THREAT_BIAS);
+const maxLurkers = () => param('chess.MAX_LURKERS', MAX_LURKERS);
+const recaptureWeight = () => param('chess.RECAPTURE_TYPE_WEIGHT', RECAPTURE_TYPE_WEIGHT);
+const attemptsPerParticle = () => param('chess.MAX_ATTEMPTS_PER_PARTICLE', MAX_ATTEMPTS_PER_PARTICLE);
+const phantomRejectWindow = () => param('chess.PHANTOM_CHECK_REJECT_WINDOW', PHANTOM_CHECK_REJECT_WINDOW);
 
 function opp(color) { return color === 'white' ? 'black' : 'white'; }
 
@@ -204,8 +216,9 @@ export class Belief {
       for (const sq of pc.possible) {
         for (const dest of reachableSquares(board, pc.type, this.oppColor, sq, hidden)) next.add(dest);
       }
-      if (next.size > MAX_POSSIBLE) {
-        pc.possible = new Set([...next].sort((a, b) => chebyshev(a, pc.anchor) - chebyshev(b, pc.anchor)).slice(0, MAX_POSSIBLE));
+      const cap = maxPossible();
+      if (next.size > cap) {
+        pc.possible = new Set([...next].sort((a, b) => chebyshev(a, pc.anchor) - chebyshev(b, pc.anchor)).slice(0, cap));
         // The set is no longer a guaranteed superset of the truth. The exact
         // belief's re-acquisition must not trust a truncated piece.
         pc.truncated = true;
@@ -374,7 +387,7 @@ export class Belief {
     // More attempts per requested world so a larger belief (now that we sample
     // more worlds) still yields the distinct particles it asks for rather than
     // giving up early — a fuller, more representative draw from P.
-    const maxAttempts = n * MAX_ATTEMPTS_PER_PARTICLE;
+    const maxAttempts = n * attemptsPerParticle();
     for (let attempt = 0; attempt < maxAttempts && particles.length < n; attempt++) {
       const pb = { ...board };
       const used = new Set();
@@ -403,8 +416,9 @@ export class Belief {
           // square the mover can't see, and a belief where a quarter of worlds
           // start in check makes every quiet move price like death — which is
           // how the search talked itself into actual king-walk blunders.
+          const typeWeight = recaptureWeight();
           const weights = plausible.map(pc =>
-            (RECAPTURE_TYPE_WEIGHT[pc.type] ?? 1) / (1 + chebyshev(fsq, pc.anchor)));
+            (typeWeight[pc.type] ?? 1) / (1 + chebyshev(fsq, pc.anchor)));
           const pc = weightedPick(plausible, weights, rng);
           pb[fsq] = { id: pc.id, ownerId: this.oppColor, type: pc.type, position: fsq, alive: true };
           forcedTaken.add(pc.id);
@@ -442,10 +456,11 @@ export class Belief {
         if (anchorFree && moveBudget <= 0) {
           sq = pc.anchor; // out of moves: this piece must still be home
         } else {
-          const biasOk = lurkers < MAX_LURKERS;
+          const biasOk = lurkers < maxLurkers();
+          const bias = threatBias();
           const weights = cands.map(s => {
             const w = 1 / (1 + chebyshev(s, pc.anchor));
-            return biasOk && threatens(pc.type, s) ? w * THREAT_BIAS : w; // surface dangerous worlds
+            return biasOk && threatens(pc.type, s) ? w * bias : w; // surface dangerous worlds
           });
           sq = weightedPick(cands, weights, rng);
           if (sq !== pc.anchor) moveBudget--; // spent one of the opponent's moves
@@ -464,7 +479,7 @@ export class Belief {
       // (evidenced) square, or by a visible piece, are kept. If non-check worlds
       // are genuinely scarce, the last attempts accept anything so a cornered
       // belief still yields particles.
-      if (myKingSq && attempt < n * PHANTOM_CHECK_REJECT_WINDOW && isAttackedBy(pb, myKingSq, this.oppColor)) {
+      if (myKingSq && attempt < n * phantomRejectWindow() && isAttackedBy(pb, myKingSq, this.oppColor)) {
         const hiddenCheckers = placedHidden.filter(ph =>
           !this.forcedEnemy.has(ph.sq) && attacksSquare(pb, ph.type, this.oppColor, ph.sq, myKingSq));
         const evidencedCheck = isAttackedBy(

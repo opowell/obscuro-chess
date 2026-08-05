@@ -50,6 +50,7 @@ import {
   moveFeatures, NUM_FEATURES, FEATURE_NAMES, makeMovePrior, weightsFromVector,
   UNIFORM_PRIOR, FITTED_WEIGHTS,
 } from '../src/movePrior.js';
+import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // The recorded games to replay. Defaults to the three fixtures the test suite
@@ -57,17 +58,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // pipeline and nowhere near enough to draw a conclusion from. Point --sessions
 // at a real corpus for that (battle-simulator keeps its recorded games in its
 // own untracked sessions/ directory).
-const sessionsFlag = process.argv.indexOf('--sessions');
-const SESSIONS = sessionsFlag >= 0 && process.argv[sessionsFlag + 1]
-  ? process.argv[sessionsFlag + 1]
-  : join(HERE, '..', 'test', 'fixtures');
-
-const argv = process.argv.slice(2);
+const { rest: argv, printConfig } = applyCliSettings();
+await maybePrintConfig(printConfig);
+const arg = makeArgReader(argv);
+const SESSIONS = arg('sessions', join(HERE, '..', 'test', 'fixtures'));
 const has = name => argv.includes('--' + name);
-const arg = (name, dflt) => {
-  const i = argv.indexOf('--' + name);
-  return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt;
-};
 const FOLDS = Number(arg('folds', '3'));
 const L2 = Number(arg('l2', '1e-3'));
 const ITERS = Number(arg('iters', '1500'));

@@ -34,6 +34,7 @@ export {
 
 export {
   ChessAgent, evaluate, alphaBeta, scoreMoveInParticle, advanceGs, clearTT, FULL_INFO_CFG,
+  CHESS_AGENT_DIAL,
 } from './ChessAgent.js';
 
 // --- Belief ---------------------------------------------------------------
@@ -64,4 +65,15 @@ export { toFEN, uciToAction } from './fen.js';
 export { PIECE_VALUE, PST } from './pieceTables.js';
 
 // --- Settings -------------------------------------------------------------
+// `settings` is the DEFAULTS (every constant, in one namespace). The rest is
+// the resolution layer: fix a parameter, or reshape the difficulty dial that
+// scales them all. See docs/SETTINGS.md.
 export * as settings from './settings.js';
+export {
+  loadSettings, setOverrides, resetSettings, rediscoverSettings,
+  settingsTree, settingsProvenance, settingsEpoch, isOverridden,
+  param, ramp, dialParam, setPath,
+  resolvedConfig, formatConfig,
+  validate as validateSettings,
+  SETTING_PATHS, SETTINGS_FILENAME, SETTINGS_ENV_VAR,
+} from './config.js';

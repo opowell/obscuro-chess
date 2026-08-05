@@ -38,6 +38,8 @@ import { getAllLegalMoves, getAllFogMoves } from './moves.js';
 import { evaluate } from './ChessAgent.js';
 import { getBelief, impossiblePlacement } from './belief.js';
 import { getExactBelief, getBeliefReachWeighting } from './exactBelief.js';
+import { DEFAULT_DIFFICULTY } from './stockfish.js';
+import { param } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Initial board setup
@@ -134,7 +136,15 @@ export const FogChess = {
         // Exactly one of difficulty (power 0–100) / aiTimeMs (per-move ms) is
         // active; if a time limit is given it wins and difficulty is left null.
         aiTimeMs:   typeof config.aiTimeMs === 'number' ? config.aiTimeMs : null,
-        difficulty: typeof config.aiTimeMs === 'number' ? null : (config.difficulty ?? 25),
+        difficulty: typeof config.aiTimeMs === 'number' ? null
+          : (config.difficulty ?? param('chess.DEFAULT_DIFFICULTY', DEFAULT_DIFFICULTY)),
+        // Optional per-SESSION parameter overrides, in the agent's own opts
+        // vocabulary ({ particles, timeBudgetMs, maxRounds, ... }). It rides the
+        // state like difficulty does, so a host running several games at once
+        // can give each its own knobs without building an agent per game — the
+        // production agent is a shared singleton. Outranks a settings file,
+        // outranked by an agent's constructor opts. See docs/SETTINGS.md.
+        ...(config.obscuro ? { obscuro: config.obscuro } : {}),
       },
     };
   },

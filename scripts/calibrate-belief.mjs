@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { replayBelief, mean } from '../src/beliefCalibration.js';
 import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from '../src/movePrior.js';
+import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // The recorded games to replay. Defaults to the three fixtures the test suite
@@ -29,16 +30,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // pipeline and nowhere near enough to draw a conclusion from. Point --sessions
 // at a real corpus for that (battle-simulator keeps its recorded games in its
 // own untracked sessions/ directory).
-const sessionsFlag = process.argv.indexOf('--sessions');
-const SESSIONS = sessionsFlag >= 0 && process.argv[sessionsFlag + 1]
-  ? process.argv[sessionsFlag + 1]
-  : join(HERE, '..', 'test', 'fixtures');
-
-const argv = process.argv.slice(2);
-const arg = (name, dflt) => {
-  const i = argv.indexOf('--' + name);
-  return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt;
-};
+const { rest: argv, printConfig } = applyCliSettings();
+await maybePrintConfig(printConfig);
+const arg = makeArgReader(argv);
+const SESSIONS = arg('sessions', join(HERE, '..', 'test', 'fixtures'));
 const maxGames = Number(arg('max-games', '999'));
 // `--sample-n 16` additionally reports SAMPLE COVERAGE: how often an n-world draw
 // from the belief contains the true position, at α=1 (∝ posterior) and α=0

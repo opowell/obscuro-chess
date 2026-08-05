@@ -53,9 +53,11 @@ import { ChessObscuroAgent } from '../src/ObscuroAgent.js';
 import { setMovePriorForSeat, setBeliefSampleAlphaForSeat } from '../src/exactBelief.js';
 import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from '../src/movePrior.js';
 import { quit as stockfishQuit } from '../src/stockfish.js';
+import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
 
-const argv = process.argv.slice(2);
-const arg = (n, d) => { const i = argv.indexOf('--' + n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
+const { rest: argv, printConfig } = applyCliSettings();
+await maybePrintConfig(printConfig);
+const arg = makeArgReader(argv);
 const pairs = Number(arg('pairs', '3'));
 const maxTurns = Number(arg('max-turns', '30'));
 // Default: whatever production actually serves (the FITTED weights). `--tau N`

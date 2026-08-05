@@ -4,6 +4,7 @@
 //
 //   node examples/demo.js
 //   node examples/demo.js --difficulty 60 --max-turns 40
+//   node examples/demo.js --set search.DIAL.power.worlds=8 --print-changed
 //
 // Every ply prints the mover's OWN view of the board (the fog is real — the
 // pieces it cannot see are not in the state it was handed), the move it chose,
@@ -16,13 +17,13 @@ import { ChessObscuroAgent } from '../src/ObscuroAgent.js';
 import { playMatch } from '../src/playMatch.js';
 import { renderBoard } from '../src/board.js';
 import { quit as stockfishQuit } from '../src/stockfish.js';
+import { applyCliSettings, maybePrintConfig, makeNumberReader } from '../src/cli.js';
 
-const arg = (flag, fallback) => {
-  const i = process.argv.indexOf(flag);
-  return i >= 0 && process.argv[i + 1] != null ? Number(process.argv[i + 1]) : fallback;
-};
-const difficulty = arg('--difficulty', 40);
-const maxTurns = arg('--max-turns', 30);
+const { rest, printConfig } = applyCliSettings();
+if (await maybePrintConfig(printConfig)) console.log('');
+const num = makeNumberReader(rest);
+const difficulty = num('difficulty', 40);
+const maxTurns = num('max-turns', 30);
 
 const agents = {
   white: new ChessObscuroAgent(),

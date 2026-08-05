@@ -1,7 +1,7 @@
 # Obscuro Chess
 
 A **fog-of-war chess AI**. Each side sees only the squares its own pieces can
-reach; there is no check or checkmate, and you win by capturing the enemy king.
+capture on; there is no check or checkmate, and you win by capturing the enemy king.
 The AI does not guess where the enemy is and then best-respond to its guess — it
 holds every position still consistent with everything it has seen, weights them
 by how likely they are, and plays an equilibrium mixed strategy over that belief.
@@ -25,8 +25,8 @@ Node 18+, with Stockfish 18 (lite, single-threaded WASM) vendored in.
 ```bash
 git clone --recurse-submodules https://github.com/opowell/obscuro-chess.git
 cd obscuro-chess
-node examples/demo.js      # two agents play fog chess, each seeing only its own view
-npm test                   # 90 tests
+node bin/obscuro-chess.js demo   # two agents play fog chess, each seeing only its own view
+npm test                         # 128 tests
 ```
 
 ## Use it
@@ -56,6 +56,35 @@ algorithm at every setting; the dial only slides continuous knobs. Every fog-che
 number is documented in [docs/PARAMETERS.md](docs/PARAMETERS.md), and the generic
 search's own knobs upstream in
 [vendor/obscuro/docs/PARAMETERS.md](vendor/obscuro/docs/PARAMETERS.md).
+
+## Settings
+
+Any of those numbers can be **fixed**, so the dial stops moving it — or the
+**dial itself reshaped**, so everything still scales together but over a
+different range. Both are the same thing: a dial entry is either a `{min, max,
+curve}` range or a bare number the dial leaves alone.
+
+```sh
+obscuro-chess config                                    # what am I running?
+obscuro-chess demo --difficulty 60 --set search.DIAL.power.worlds=32
+obscuro-chess move-quality --set search.DIAL.power.worlds.max=96
+```
+
+```jsonc
+// obscuro-chess.settings.json, picked up from the working directory
+{
+  "search": { "DIAL": { "power": { "worlds": 32 } } },   // fixed
+  "chess":  { "EXACT_BELIEF_CAP": 500000 }
+}
+```
+
+The keys are the export names of the two `settings.js` aggregates — the same
+names as the PARAMETERS.md tables — and a key that isn't one of them is an
+error rather than a silent no-op. A settings file, `$OBSCURO_CHESS_SETTINGS`,
+`--set`, a per-game `gameSpecific.obscuro` bag and an agent's constructor opts
+stack in that order. The `search.*` half is forwarded to
+[obscuro-ai's own settings layer](vendor/obscuro/docs/SETTINGS.md), which owns
+those parameters. Full reference: [docs/SETTINGS.md](docs/SETTINGS.md).
 
 ## The belief is the interesting part
 
@@ -102,10 +131,13 @@ src/
                         rules, move generation, FEN
   playMatch.js          a minimal self-play loop for the scripts and the demo
   settings.js           every fog-chess default, in one place
+  config.js             settings resolution: fix a parameter, or reshape the dial
+  cli.js                shared --settings / --set / --print-config handling
+bin/obscuro-chess.js    demo, the tuning harnesses and `config`, in one command
 vendor/obscuro/         the generic search (submodule: opowell/obscuro-ai)
 vendor/stockfish/       Stockfish 18 lite, single-threaded WASM
-test/                   90 tests, incl. three real recorded games as fixtures
-docs/                   parameters, and the plans behind the current design
+test/                   128 tests, incl. three real recorded games as fixtures
+docs/                   parameters, how to change one, and the design plans
 scripts/                calibration, prior fitting, move quality, strength
 ```
 

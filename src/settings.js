@@ -11,9 +11,13 @@
 // place to come and read "what does chess's Obscuro do by default", while the
 // numbers and their reasoning stay next to the logic they tune.
 //
-// See OBSCURO-PARAMETERS.md (in this directory) for the full prose write-up of
-// every entry below. The generic search's own knobs are documented upstream, in
-// vendor/obscuro/docs/PARAMETERS.md.
+// See docs/PARAMETERS.md for the full prose write-up of every entry below, and
+// docs/SETTINGS.md for how to override one. The generic search's own knobs are
+// documented upstream, in vendor/obscuro/docs/PARAMETERS.md.
+//
+// EVERY NAME BELOW IS ALSO A SETTINGS KEY, as `chess.<NAME>` — src/config.js
+// resolves overrides against exactly this export list, so there is no second
+// vocabulary to keep in step. (test/settings.test.js asserts the two match.)
 // ---------------------------------------------------------------------------
 
 // src/ObscuroAgent.js — the chess-specific difficulty dial (leaf-eval
@@ -26,6 +30,10 @@ export {
   SEARCH_WIN,
   MAX_SF_DEPTH,
 } from './ObscuroAgent.js';
+
+// src/ChessAgent.js — the plain alpha-beta agent's own difficulty ramp
+// (search depth, score noise, fog particle count).
+export { CHESS_AGENT_DIAL } from './ChessAgent.js';
 
 // src/belief.js — the heuristic particle belief (used once exact
 // tracking is lost; see exactBelief.js below for the primary tracker).
@@ -46,6 +54,7 @@ export {
   TIME_GUARD_MS as EXACT_BELIEF_TIME_GUARD_MS,
   REACQUIRE_BOUND,
   SAMPLE_ALPHA_DEFAULT,
+  REACH_WEIGHTING_DEFAULT,
 } from './exactBelief.js';
 
 // src/movePrior.js — π(move | position), the opponent model that
@@ -61,6 +70,8 @@ export {
   RECYCLE_AFTER,
   CACHE_MAX,
   STOP_POLL_MS,
+  SF_CACHE_DIR,
   LEGACY_DIFFICULTY,
+  DEFAULT_DIFFICULTY,
   SF_DIFFICULTY_RAMP,
 } from './stockfish.js';

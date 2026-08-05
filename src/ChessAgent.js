@@ -7,6 +7,7 @@ import {
 } from './stockfish.js';
 import { toFEN, uciToAction } from './fen.js';
 import { PIECE_VALUE, PST } from './pieceTables.js';
+import { param, ramp } from './config.js';
 
 const FILES = 'abcdefgh';
 
@@ -282,14 +283,37 @@ export const FULL_INFO_CFG = {
 // Difficulty is a 0–100 dial (see stockfish.js). Knobs are derived continuously:
 // search depth and particle count rise with difficulty, while the random "noise"
 // added to scores (which makes weak play blunder) fades out by the mid-range.
+//
+// This agent's dial used to be an inline table inside the function below, which
+// made it the one difficulty ramp in this package that no aggregate listed and
+// nothing could override. Same numbers, now a named endpoint table like
+// CHESS_DIAL and DIAL: re-exported through src/settings.js and settable.
+export const CHESS_AGENT_DIAL = {
+  depth: { min: 2, max: 5, curve: 'linear' },       // plies per particle
+  noiseCp: 250,                                     // score jitter at difficulty 0…
+  noiseZeroAt: 0.5,                                 // …falling linearly to 0 at this t
+  quiesceFrom: 0.2,                                 // resolve captures at leaves from here up
+  fog: {
+    particles: { min: 4, max: 18, curve: 'linear' },
+    topK: { min: 6, max: 10, curve: 'linear' },     // candidate-move prefilter width
+    depthShallow: 1,                                // per-particle depth below shallowBelow…
+    depthDeep: 2,                                   // …and at or above it
+    shallowBelow: 0.2,
+  },
+};
+
 function chessConfigForDifficulty(difficulty) {
   const t = difficultyToNumber(difficulty) / 100;
-  const lerp = (a, b) => Math.round(a + (b - a) * t);
+  const D = param('chess.CHESS_AGENT_DIAL', CHESS_AGENT_DIAL);
   return {
-    depth: lerp(2, 5),
-    noise: Math.round(Math.max(0, 250 * (1 - t / 0.5))), // 250 cp at 0 → 0 by 50
-    useQuiesce: t >= 0.2,
-    fog: { particles: lerp(4, 18), depth: t < 0.2 ? 1 : 2, topK: lerp(6, 10) },
+    depth: ramp(D.depth, t),
+    noise: Math.round(Math.max(0, D.noiseCp * (1 - t / D.noiseZeroAt))),
+    useQuiesce: t >= D.quiesceFrom,
+    fog: {
+      particles: ramp(D.fog.particles, t),
+      depth: t < D.fog.shallowBelow ? D.fog.depthShallow : D.fog.depthDeep,
+      topK: ramp(D.fog.topK, t),
+    },
   };
 }
 

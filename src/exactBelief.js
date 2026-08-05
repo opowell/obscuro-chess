@@ -58,12 +58,20 @@
 // ---------------------------------------------------------------------------
 
 import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from './movePrior.js';
+import { param, settingsEpoch } from './config.js';
 
 // Exported so src/settings.js can list them; kept defined here,
 // next to the tracker that tunes them.
 export const CAP = 200000;          // paper: |P| usually ≤ 10⁶ (C++); avg ~17k
 export const TIME_GUARD_MS = 4000;  // per-turn update budget
 export const REACQUIRE_BOUND = 60000;
+
+// Effective values (defaults above; see docs/SETTINGS.md). Raising CAP and
+// TIME_GUARD_MS together is the standard way to trade turn latency for staying
+// exact longer, which is why they are settable rather than baked in.
+const cap = () => param('chess.EXACT_BELIEF_CAP', CAP);
+const timeGuardMs = () => param('chess.EXACT_BELIEF_TIME_GUARD_MS', TIME_GUARD_MS);
+const reacquireBound = () => param('chess.REACQUIRE_BOUND', REACQUIRE_BOUND);
 
 // The π used by trackers that don't ask for a specific one — i.e. all of
 // production, via getExactBelief.
@@ -90,11 +98,25 @@ export const REACQUIRE_BOUND = 60000;
 // Log-loss is still the gate and rank still is not — see belief.js's header
 // (THREAT_BIAS, MAX_LURKERS) for the two earlier times an over-sharp belief made
 // the AI worse.
-let defaultPrior = makeMovePrior(FITTED_WEIGHTS);
+// Compiled on first use, not at import: `chess.MOVE_PRIOR_FITTED_WEIGHTS` in a
+// settings file is deep-merged onto FITTED_WEIGHTS, and a host configures the
+// AI after this module has loaded. Compiling is not free (makeMovePrior builds
+// a scorer from the weight vector), so it is cached — but keyed on the settings
+// epoch, or the first read of the weights would freeze them for the process and
+// a sweep over them would silently measure one arm many times.
+let defaultPrior = null;
+let defaultPriorEpoch = -1;
 
 /** Swap the production π. Pass null to restore the uniform baseline. */
-export function setDefaultMovePrior(prior) { defaultPrior = prior ?? UNIFORM_PRIOR; }
-export function getDefaultMovePrior() { return defaultPrior; }
+export function setDefaultMovePrior(prior) {
+  defaultPrior = prior ?? UNIFORM_PRIOR;
+  defaultPriorEpoch = Infinity;   // an explicit choice outlives any settings change
+}
+export function getDefaultMovePrior() {
+  if (defaultPrior && defaultPriorEpoch >= settingsEpoch()) return defaultPrior;
+  defaultPriorEpoch = settingsEpoch();
+  return defaultPrior = makeMovePrior(param('chess.MOVE_PRIOR_FITTED_WEIGHTS', FITTED_WEIGHTS));
+}
 
 // Per-seat override, for A/B harnesses that need one seat's belief to run a
 // different model from the other's IN THE SAME PROCESS — which is what a
@@ -133,9 +155,14 @@ export function setMovePriorForSeat(color, prior) {
 // uncertainty it is concentrating over. Raising α needs a higher-powered strength
 // measurement than the harness currently gives (see its header) — not this comment.
 export const SAMPLE_ALPHA_DEFAULT = 0;
-let sampleAlpha = SAMPLE_ALPHA_DEFAULT;
-export function setBeliefSampleAlpha(a) { sampleAlpha = Number.isFinite(a) ? a : SAMPLE_ALPHA_DEFAULT; }
-export function getBeliefSampleAlpha() { return sampleAlpha; }
+// null = nobody called the setter, so follow the settings layer (which itself
+// falls back to the constant above). Keeping "unset" distinct from "set to the
+// default value" is what lets a settings file supply the starting α while
+// setBeliefSampleAlpha() still wins for a caller that asks explicitly.
+let sampleAlpha = null;
+const defaultSampleAlpha = () => param('chess.SAMPLE_ALPHA_DEFAULT', SAMPLE_ALPHA_DEFAULT);
+export function setBeliefSampleAlpha(a) { sampleAlpha = Number.isFinite(a) ? a : null; }
+export function getBeliefSampleAlpha() { return sampleAlpha ?? defaultSampleAlpha(); }
 
 // Per-seat counterpart of the above, same purpose as setMovePriorForSeat.
 const alphaBySeat = new Map();
@@ -180,9 +207,9 @@ export function setBeliefSampleAlphaForSeat(color, a) {
 // effective worlds) rather than incorrectness. `true`/`false` still work.
 export const REACH_WEIGHTING_DEFAULT = 0;
 const asBeta = (v) => (v == null ? null : v === true ? 1 : v === false ? 0 : Number(v));
-let reachWeighting = REACH_WEIGHTING_DEFAULT;
+let reachWeighting = null;   // null = unset; see setBeliefSampleAlpha above
 export function setBeliefReachWeighting(on) {
-  reachWeighting = asBeta(on) ?? REACH_WEIGHTING_DEFAULT;
+  reachWeighting = asBeta(on);
 }
 const reachBySeat = new Map();
 export function setBeliefReachWeightingForSeat(color, on) {
@@ -190,7 +217,8 @@ export function setBeliefReachWeightingForSeat(color, on) {
   if (b == null) reachBySeat.delete(color); else reachBySeat.set(color, b);
 }
 export function getBeliefReachWeighting(color) {
-  return reachBySeat.get(color) ?? reachWeighting;
+  return reachBySeat.get(color) ?? reachWeighting
+    ?? param('chess.REACH_WEIGHTING_DEFAULT', REACH_WEIGHTING_DEFAULT);
 }
 
 // --- encoding ---------------------------------------------------------------
@@ -518,8 +546,8 @@ export class ExactBelief {
     this._lastTurnKey = null;
     // Resolved at construction, not per sweep, so a tracker's model can't change
     // under it mid-game — that would make its own weights incomparable.
-    this._prior = movePrior ?? defaultPrior;
-    this._alpha = alphaBySeat.get(aiColor) ?? sampleAlpha;
+    this._prior = movePrior ?? getDefaultMovePrior();
+    this._alpha = alphaBySeat.get(aiColor) ?? getBeliefSampleAlpha();
     this._pi = new Float64Array(256); // per-parent π scratch; grown if needed
   }
 
@@ -657,7 +685,7 @@ export class ExactBelief {
     const prior = this._prior;
     for (let pi = 0; pi < this.positions.length; pi++) {
       const pos = this.positions[pi];
-      if (Date.now() - t0 > TIME_GUARD_MS) { this._giveUp(); return; }
+      if (Date.now() - t0 > timeGuardMs()) { this._giveUp(); return; }
       const moves = genFogMoves(pos, oppSign);
       if (moves.length === 0) continue; // the opponent DID move
       if (moves.length > this._pi.length) this._pi = new Float64Array(moves.length * 2);
@@ -683,7 +711,7 @@ export class ExactBelief {
         seen.set(h, next.length);
         next.push(np);
         nextW.push(w);
-        if (next.length > CAP) { this._giveUp(); return; }
+        if (next.length > cap()) { this._giveUp(); return; }
       }
     }
     this.positions = next;
@@ -729,7 +757,7 @@ export class ExactBelief {
       hidden.push({ code: PIECE_CODE[pc.type] * -this.mySign, cands });
     }
     let bound = 1;
-    for (const h of hidden) { bound *= h.cands.length; if (bound > REACQUIRE_BOUND) return; }
+    for (const h of hidden) { bound *= h.cands.length; if (bound > reacquireBound()) return; }
 
     // Base array: the observed board (all our pieces + visible enemies), with
     // OUR castling rights from the observation; the opponent's rights are
@@ -748,7 +776,7 @@ export class ExactBelief {
     const seen = new Set();
     const t0 = Date.now();
     const place = (i, arr) => {
-      if (out.length > CAP || Date.now() - t0 > TIME_GUARD_MS) return false;
+      if (out.length > cap() || Date.now() - t0 > timeGuardMs()) return false;
       if (i === hidden.length) {
         for (const fi of forced) { // a piece of ours was just captured there
           const f = arr[fi];
@@ -778,7 +806,7 @@ export class ExactBelief {
       return true;
     };
     if (!place(0, base)) return; // bailed on cap/time
-    if (out.length === 0 || out.length > CAP) return;
+    if (out.length === 0 || out.length > cap()) return;
     this.positions = out;
     this._setWeights(new Array(out.length).fill(1)); // no history → no posterior
     this.exact = true;

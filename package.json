@@ -24,13 +24,18 @@
     "belief-state"
   ],
   "main": "./src/index.js",
+  "bin": {
+    "obscuro-chess": "./bin/obscuro-chess.js"
+  },
   "exports": {
     ".": "./src/index.js",
     "./game": "./src/FogChess.js",
     "./stockfish": "./src/stockfish.js",
+    "./config": "./src/config.js",
     "./vendor/stockfish/*": "./vendor/stockfish/*"
   },
   "files": [
+    "bin",
     "src",
     "vendor/stockfish",
     "vendor/obscuro/src",
@@ -44,11 +49,13 @@
   },
   "scripts": {
     "test": "node --test",
-    "demo": "node examples/demo.js",
-    "calibrate": "node scripts/calibrate-belief.mjs",
-    "fit-prior": "node scripts/fit-move-prior.mjs",
-    "move-quality": "node scripts/move-quality.mjs",
-    "strength": "node scripts/strength-belief.mjs"
+    "obscuro-chess": "node bin/obscuro-chess.js",
+    "config": "node bin/obscuro-chess.js config",
+    "demo": "node bin/obscuro-chess.js demo",
+    "calibrate": "node bin/obscuro-chess.js calibrate",
+    "fit-prior": "node bin/obscuro-chess.js fit-prior",
+    "move-quality": "node bin/obscuro-chess.js move-quality",
+    "strength": "node bin/obscuro-chess.js strength"
   },
   "dependencies": {},
   "devDependencies": {}

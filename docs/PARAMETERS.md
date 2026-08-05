@@ -20,6 +20,12 @@ constant is still defined next to the code it tunes, with the comment explaining
 that looked reasonable and measurably made play worse). If you're changing a
 default, edit it at its declaration (linked below), not in the aggregate.
 
+**To override one without editing anything**, see [SETTINGS.md](SETTINGS.md).
+Every name in the two aggregates is also a settings key — `chess.LEAF_CLAMP`,
+`search.DIAL.power.worlds` — settable from a JSON file, the command line, or
+per game. A parameter can be **fixed** (the difficulty dial stops moving it) or
+left to **scale** with the dial, whose own endpoints and curve are settable too.
+
 ---
 
 ## 1. The generic search (any game)
@@ -88,11 +94,12 @@ sharpened by `β`):
 | `proportionalPick.betaAtHalf` | 1 | `β` at `t = 0.5` — probability exactly ∝ win-probability |
 | `proportionalPick.betaMax` | 12 | `β` at `t = 1` — collapses toward near-best play (t ≥ 0.999 is exactly pure Stockfish) |
 
-Two more full-strength constants live inline (not dial-scaled, so not in
-`CHESS_DIAL`): `chooseAction`'s perfect-info **TIME mode** plays
-`stockfishBestAction` with `skill: 20` (no handicap) and `movetime` clamped to
-`[1, 600000]`; `_captureStockfishAnalysis` (analysis-only, doesn't affect play)
-always asks for `multipv: 8, depth: 12`.
+**Perfect-information TIME mode** plays `stockfishBestAction` at full strength —
+the user's clock is the only handicap, so there is no Skill Level one on top:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `timeModeSkill` | 20 | UCI Skill Level (20 = no handicap). `movetime` is the user's limit, clamped to `[1, 600000]` |
 
 ### 2.3 Analysis-panel search sizes (`ANALYSIS_DEFAULTS`, `src/ObscuroAgent.js`)
 
@@ -111,6 +118,7 @@ setting:
 | `sweepBatches` | 4 | generative-fallback only: batches per ladder rung before climbing depth |
 | `likelyWorldsCap` | 32 | size of the "most likely boards" overlay |
 | `scoredWorldsCap` | 96 | cap on the per-world cp view |
+| `captureMultipv` / `captureDepth` | 8 / 12 | `_captureStockfishAnalysis`'s ranking beside a time-mode perfect-information move — display only, never changes what is played |
 
 ### 2.4 Belief tracking
 
@@ -128,6 +136,11 @@ or the tracker was attached mid-game).
 | `TIME_GUARD_MS` | 4000 | per-turn update budget; exceeding it also abandons exactness |
 | `REACQUIRE_BOUND` | 60,000 | max cross-product size `tryReacquire` will search when trying to rebuild a lost `P` from the heuristic belief |
 | `SAMPLE_ALPHA_DEFAULT` | 0 | exponent applied to the posterior when *sampling* search worlds (`draw ∝ w^α`). **Ships at 0 (uniform over P), deliberately ignoring the posterior** — see the long comment on `setBeliefSampleAlpha`: α=1 measured *better* sample coverage (39.3% vs 36.1% chance of including the true position) but *worse* actual play (4–11 in seat-swapped self-play). When a proxy and the target disagree, this repo follows the target. |
+| `REACH_WEIGHTING_DEFAULT` | 0 | exponent β on how much each sampled world is *worth* to the CFR (reach ∝ `w^β`), as opposed to how it is sampled. **Ships off**, on a measurement that leans against it; see the long comment on `setBeliefReachWeighting` for the tempered β≈0.5 arm that is worth measuring next. |
+
+Both α and β are the *initial* values: `setBeliefSampleAlpha` /
+`setBeliefReachWeighting` (and their per-seat variants, which is how the A/B
+harnesses run two models in one process) still win over a settings file.
 
 **Heuristic particle belief (`src/belief.js`)** — used once exact
 tracking is lost:
@@ -171,8 +184,26 @@ this model's `floor` exists for the same reason.
 | `RECYCLE_AFTER` | 400 (calls) | the engine worker is torn down and respawned after this many searches, proactively, before the vendored WASM's heap growth aborts it |
 | `CACHE_MAX` | 20,000 (entries) | LRU cap on the disk-backed MultiPV cache (SQLite when `node:sqlite` is available, else append-only NDJSON) |
 | `STOP_POLL_MS` | 100 | how often an in-flight search re-checks the caller's `isCancelled` and can send UCI `stop` |
+| `SF_CACHE_DIR` | `vendor/stockfish/` | where that cache lives. Derived data, not part of the package — an embedder with a warm cache keeps it in its own checkout. Overridden by the `SF_CACHE_DIR` env var, and by a `setCacheDir()` call before the first search. |
 | `LEGACY_DIFFICULTY` | `{easy:10, medium:35, hard:65, expert:90}` | maps old string difficulty tiers onto the 0–100 scale, for saved sessions |
+| `DEFAULT_DIFFICULTY` | 25 | what "no difficulty given" means. One number, read by `difficultyToNumber`, `FogChess.createInitialState` and the agent's `_config` — it used to be answered 25/25/50 by those three, so an observation that had lost its difficulty played at a different strength depending on which path asked. |
 | `SF_DIFFICULTY_RAMP` | `movetimeMs: 50–1000, skill: 0–20` | perfect-information difficulty → `(movetime, Skill Level)`, used by `sfOptsForDifficulty` (the legacy/non-Obscuro chess agent path) |
+
+### 2.7 The alpha-beta agent's dial (`CHESS_AGENT_DIAL`, `src/ChessAgent.js`)
+
+`ChessAgent` is the plain alpha-beta + Stockfish agent, not the Obscuro one. It
+has always had its own difficulty ramp; until this table existed it was an
+inline literal inside `chessConfigForDifficulty`, which made it the one dial in
+this package that no aggregate listed and nothing could override. Same numbers:
+
+| Field | Range/Value | Meaning |
+|---|---|---|
+| `depth` | 2 – 5 | plies searched per particle |
+| `noiseCp` / `noiseZeroAt` | 250 / 0.5 | random score jitter in centipawns at `t = 0`, falling linearly to 0 by `t = 0.5` — this is what makes weak difficulties blunder |
+| `quiesceFrom` | 0.2 | resolve capture sequences at leaves from this `t` up |
+| `fog.particles` | 4 – 18 | belief particles under fog |
+| `fog.topK` | 6 – 10 | candidate-move prefilter width |
+| `fog.depthShallow` / `.depthDeep` / `.shallowBelow` | 1 / 2 / 0.2 | per-particle depth under fog: `depthShallow` below `t = 0.2`, `depthDeep` at or above |
 
 ---
 
@@ -185,7 +216,16 @@ this model's `floor` exists for the same reason.
 2. Export it, and add it to the aggregate: `src/settings.js`
    for a chess parameter, or `vendor/obscuro/src/settings.js` upstream for a
    generic one (which then needs a submodule bump here).
-3. Add a row to this document — or to `vendor/obscuro/docs/PARAMETERS.md` if
+3. Read it through `param('chess.<NAME>', <NAME>)` (see `src/config.js`) rather
+   than reading the constant directly, and add `<NAME>` to `SETTING_PATHS` in
+   `src/config.js` so it can be overridden. Read it at *use* time, not at
+   module load: the production agent is a singleton constructed at import,
+   before any host can configure it. `test/settings.test.js` asserts the key
+   space and the aggregate's export list stay identical, so skipping this step
+   fails the suite.
+4. Add a row to this document — or to `vendor/obscuro/docs/PARAMETERS.md` if
    it's a generic knob.
-4. If it affects play strength, measure before and after — `move-quality.mjs`
-   and `strength-belief.mjs` are the existing harnesses for exactly this.
+5. If it affects play strength, measure before and after — `move-quality.mjs`
+   and `strength-belief.mjs` are the existing harnesses for exactly this, and
+   `--set <NAME>=…` is how to sweep it without editing the default
+   ([SETTINGS.md](SETTINGS.md#running-a-sweep)).

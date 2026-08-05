@@ -44,6 +44,7 @@
 // ---------------------------------------------------------------------------
 
 import { toFEN, uciToAction } from './fen.js';
+import { param, ramp } from './config.js';
 
 // This module is imported both server-side (Node) and inside the browser
 // analysis Web Worker (apps/design/analysis-worker.js), which pulls in the whole
@@ -103,6 +104,7 @@ let callsSinceLoad = 0;
 // Exported so src/settings.js can list it alongside every
 // other fog-chess default.
 export const RECYCLE_AFTER = 400;
+const recycleAfter = () => param('chess.RECYCLE_AFTER', RECYCLE_AFTER);
 
 // Abort callbacks for in-flight requests. When the worker dies mid-search we
 // call these to resolve each pending request as null immediately, rather than
@@ -125,20 +127,26 @@ let DatabaseSync = null;
 if (isNode) { try { ({ DatabaseSync } = await import('node:sqlite')); } catch {} }
 
 export const CACHE_MAX = 20_000;
+const cacheMax = () => param('chess.CACHE_MAX', CACHE_MAX);
 
 // WHERE the cache lives. It defaults next to the engine, but it is derived data,
 // not part of the package: an embedder that already has a warm cache (a few tens
 // of MB of it, in battle-simulator's case) keeps it in its OWN checkout and points
 // us at it, so a `git pull` of this repo never carries someone else's evaluations
-// and this repo never has to ship them. Set SF_CACHE_DIR, or call setCacheDir()
-// before the first search — after the cache is open, changing it is ignored,
-// because the entries already read are the ones the process is answering from.
-let cacheDir = isNode ? (process.env.SF_CACHE_DIR || path.join(HERE, '..', 'vendor', 'stockfish')) : '';
+// and this repo never has to ship them. Point us at it with `chess.SF_CACHE_DIR`
+// in a settings file, the SF_CACHE_DIR env var, or a setCacheDir() call — in
+// that order of increasing precedence — before the first search. After the
+// cache is open, changing it is ignored, because the entries already read are
+// the ones the process is answering from.
+export const SF_CACHE_DIR = isNode ? path.join(HERE, '..', 'vendor', 'stockfish') : '';
+let explicitCacheDir = '';
 export function setCacheDir(dir) {
   if (!isNode || db || sfCache) return;         // already open (or browser) — no-op
-  cacheDir = dir instanceof URL ? fileURLToPath(dir) : dir;
+  explicitCacheDir = dir instanceof URL ? fileURLToPath(dir) : dir;
 }
-const cachePath = (ext) => path.join(cacheDir, `sf-cache.${ext}`);
+const cacheDir = () =>
+  explicitCacheDir || param('chess.SF_CACHE_DIR', (isNode && process.env.SF_CACHE_DIR) || SF_CACHE_DIR);
+const cachePath = (ext) => path.join(cacheDir(), `sf-cache.${ext}`);
 
 // SQLite state (used when DatabaseSync is available)
 let db = null, stmtGet, stmtSet, stmtTouch, stmtEvict;
@@ -185,7 +193,7 @@ function loadCache() {
         catch { /* corrupt line — skip */ }
       }
     } catch { /* missing — start fresh */ }
-    while (sfCache.size > CACHE_MAX) sfCache.delete(sfCache.keys().next().value);
+    while (sfCache.size > cacheMax()) sfCache.delete(sfCache.keys().next().value);
     if (lineCount > sfCache.size * 1.5) compactNdjson();
   }
 }
@@ -221,12 +229,12 @@ function cacheSet(rawKey, value) {
   if (db) {
     try {
       const isNew = !stmtGet.get(key);
-      if (isNew && sqliteSize >= CACHE_MAX) { stmtEvict.run(); sqliteSize--; }
+      if (isNew && sqliteSize >= cacheMax()) { stmtEvict.run(); sqliteSize--; }
       stmtSet.run(key, JSON.stringify(value), ++lruSeq);
       if (isNew) sqliteSize++;
     } catch { /* busy — skip this write */ }
   } else if (sfCache) {
-    if (sfCache.size >= CACHE_MAX && !sfCache.has(key)) sfCache.delete(sfCache.keys().next().value);
+    if (sfCache.size >= cacheMax() && !sfCache.has(key)) sfCache.delete(sfCache.keys().next().value);
     sfCache.delete(key); sfCache.set(key, value);
     try { fs.appendFileSync(cachePath('ndjson'), JSON.stringify([key, value]) + '\n'); } catch { /* ignore */ }
   }
@@ -313,7 +321,7 @@ export function quit() {
 // (between requests), so no search is ever interrupted. Terminating a whole
 // worker (vs. reloading in-process) is what actually reclaims the memory.
 async function maybeRecycle() {
-  if (callsSinceLoad < RECYCLE_AFTER) return;
+  if (callsSinceLoad < recycleAfter()) return;
   callsSinceLoad = 0;
   const old = worker;
   worker = null; readyPromise = null; listeners = [];
@@ -326,6 +334,7 @@ async function maybeRecycle() {
 
 // How often an in-flight search re-checks its caller's `isCancelled` (see below).
 export const STOP_POLL_MS = 100;
+const stopPollMs = () => param('chess.STOP_POLL_MS', STOP_POLL_MS);
 
 // Run one UCI request, collecting lines until `isDone(line)` returns a result.
 // Serialised behind `queue` so only one search runs at a time.
@@ -367,7 +376,7 @@ function request(commands, isDone, timeoutMs, { isCancelled, onStopped } = {}) {
           clearInterval(poll); poll = null;
           onStopped?.();
           try { send('stop'); } catch { /* engine gone — the timeout still fires */ }
-        }, STOP_POLL_MS);
+        }, stopPollMs());
       }
       timer = setTimeout(() => done(null), timeoutMs);
     });
@@ -490,25 +499,31 @@ export async function multiPV(fen, { multipv = 10, depth = 2, onInfo, isCancelle
 // Difficulty is a 0–100 number (0 = weakest, 100 = strongest). Legacy string
 // tiers are mapped onto the scale so old saved sessions keep working.
 export const LEGACY_DIFFICULTY = { easy: 10, medium: 35, hard: 65, expert: 90 };
+
+// What "no difficulty given" means. This used to be answered three different
+// ways — 25 here, 25 in FogChess.createInitialState, 50 in the generic agent's
+// _config — so an observation that had lost its difficulty played at a
+// different strength depending on which code path asked. One number now, read
+// by all three.
+export const DEFAULT_DIFFICULTY = 25;
+
 export function difficultyToNumber(difficulty) {
-  const n = typeof difficulty === 'number' ? difficulty : (LEGACY_DIFFICULTY[difficulty] ?? 25);
+  const fallback = param('chess.DEFAULT_DIFFICULTY', DEFAULT_DIFFICULTY);
+  const legacy = param('chess.LEGACY_DIFFICULTY', LEGACY_DIFFICULTY);
+  const n = typeof difficulty === 'number' ? difficulty : (legacy[difficulty] ?? fallback);
   return n < 0 ? 0 : n > 100 ? 100 : n;
 }
 
 // Map difficulty (0–100) to engine strength (Skill Level 0–20) and time per
-// move. Endpoints re-exported via src/settings.js's
-// SF_DIFFICULTY_RAMP for documentation; this function is the source of truth.
+// move, for the perfect-information / legacy agent path.
 export const SF_DIFFICULTY_RAMP = {
-  movetimeMs: { min: 50, max: 1000 },
-  skill: { min: 0, max: 20 },
+  movetimeMs: { min: 50, max: 1000, curve: 'linear' },
+  skill: { min: 0, max: 20, curve: 'linear' },
 };
 export function sfOptsForDifficulty(difficulty) {
   const t = difficultyToNumber(difficulty) / 100;
-  const { movetimeMs, skill } = SF_DIFFICULTY_RAMP;
-  return {
-    movetime: Math.round(movetimeMs.min + t * (movetimeMs.max - movetimeMs.min)),
-    skill: Math.round(skill.min + t * (skill.max - skill.min)),
-  };
+  const { movetimeMs, skill } = param('chess.SF_DIFFICULTY_RAMP', SF_DIFFICULTY_RAMP);
+  return { movetime: ramp(movetimeMs, t), skill: ramp(skill, t) };
 }
 
 /**
