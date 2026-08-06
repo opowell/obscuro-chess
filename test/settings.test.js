@@ -17,7 +17,9 @@ import {
   validate, SETTING_PATHS, setPath,
 } from '../src/config.js';
 import { FogChess } from '../src/FogChess.js';
-import { ChessObscuroAgent, ObscuroAgent, CHESS_DIAL, LEAF_CLAMP } from '../src/ObscuroAgent.js';
+import {
+  ChessObscuroAgent, ObscuroAgent, CHESS_DIAL, LEAF_CLAMP, REFUSED_CHILD_CAP,
+} from '../src/ObscuroAgent.js';
 import { DEFAULT_DIFFICULTY, difficultyToNumber, quit as stockfishQuit } from '../src/stockfish.js';
 import { getDefaultMovePrior, setDefaultMovePrior } from '../src/exactBelief.js';
 import * as chessSettings from '../src/settings.js';
@@ -152,6 +154,15 @@ test('a plain chess constant is settable and read at use time', () => {
   assert.equal(param('chess.LEAF_CLAMP', LEAF_CLAMP), 900);
   resetSettings();
   assert.equal(param('chess.LEAF_CLAMP', LEAF_CLAMP), 1500);
+});
+
+test('a knob that used to be an env var only is a settings key like any other', () => {
+  // REFUSED_CHILD_CAP predates this system: OBSCURO_REFUSED_CHILD_CAP was the
+  // only way to sweep it. The env var is now the declared DEFAULT, so the normal
+  // layers outrank it and it shows up in --print-config with everything else.
+  assert.equal(param('chess.REFUSED_CHILD_CAP', REFUSED_CHILD_CAP), 8);
+  setOverrides({ chess: { REFUSED_CHILD_CAP: 2 } });
+  assert.equal(param('chess.REFUSED_CHILD_CAP', REFUSED_CHILD_CAP), 2);
 });
 
 test('a nested default is deep-merged, not replaced', () => {

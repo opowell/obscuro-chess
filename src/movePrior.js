@@ -245,6 +245,19 @@ export const FITTED_WEIGHTS = {
   castleBonus: 202.5,
 };
 
+// SERVE THE MODEL-FREE BASELINE instead of the fitted π — no opponent model at
+// all, every fog-legal move equally likely (UNIFORM_PRIOR below).
+//
+// This is the paper's own setting: Zhang & Sandholm draw search worlds uniformly
+// at random from P and model nothing about how the opponent chooses (see
+// FogChess.sampleWorlds and presets.js `zhang-sandholm`). It is also the arm every
+// measurement of this model is against, which is why it is a switch rather than
+// something a caller has to reconstruct out of weights: `floor` cannot reach 1 and
+// `temperature: Infinity` is not expressible in a JSON settings file.
+//
+// Note that uniform π is NOT a flat posterior over P — see UNIFORM_PRIOR.
+export const UNIFORM_ONLY = false;
+
 /**
  * Build a prior. The returned function fills `out[0..moves.length-1]` with
  * π(m | pos), NORMALIZED so Σ_m π = 1.

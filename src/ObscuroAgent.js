@@ -206,8 +206,12 @@ function engineWouldRefuse(board, mover) {
 // work ~4×. The cap spends the budget on the children most likely to matter
 // (best static score first) and leaves the tail on the static evaluator, which
 // is what the whole node used to get.
-const REFUSED_CHILD_CAP = Number(
+// `OBSCURO_REFUSED_CHILD_CAP` is the DECLARED DEFAULT rather than a layer of its
+// own: it predates the settings system, and a lone env var was the only way to
+// sweep this. `chess.REFUSED_CHILD_CAP` outranks it, like every other parameter.
+export const REFUSED_CHILD_CAP = Number(
   (typeof process !== 'undefined' && process.env?.OBSCURO_REFUSED_CHILD_CAP) ?? 8);
+const refusedChildCap = () => param('chess.REFUSED_CHILD_CAP', REFUSED_CHILD_CAP);
 
 async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled }) {
   const them = otherColor(mover);
@@ -234,7 +238,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
       evaluate(childStates[b].board, mover) - evaluate(childStates[a].board, mover));
     const priced = new Set();
     const side = them === 'white' ? 'w' : 'b';
-    for (const i of order.slice(0, REFUSED_CHILD_CAP)) {
+    for (const i of order.slice(0, refusedChildCap())) {
       const cs = childStates[i];
       if (engineWouldRefuse(cs.board, them)) continue; // child refused too — leave it
       let pv = null;

@@ -32,6 +32,7 @@
     "./game": "./src/FogChess.js",
     "./stockfish": "./src/stockfish.js",
     "./config": "./src/config.js",
+    "./presets": "./src/presets.js",
     "./vendor/stockfish/*": "./vendor/stockfish/*"
   },
   "files": [

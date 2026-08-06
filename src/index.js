@@ -75,5 +75,10 @@ export {
   param, ramp, dialParam, setPath,
   resolvedConfig, formatConfig,
   validate as validateSettings,
+  deepMerge as mergeSettings,
   SETTING_PATHS, SETTINGS_FILENAME, SETTINGS_ENV_VAR,
 } from './config.js';
+// Whole configurations under one name — notably `zhang-sandholm` (alias
+// `paper`), which puts every parameter this repo measured away from the paper's
+// design point back. See src/presets.js and docs/SETTINGS.md.
+export { PRESETS, preset, presetNames, loadPreset, formatPresets } from './presets.js';

@@ -25,6 +25,8 @@ Every name in the two aggregates is also a settings key — `chess.LEAF_CLAMP`,
 `search.DIAL.power.worlds` — settable from a JSON file, the command line, or
 per game. A parameter can be **fixed** (the difficulty dial stops moving it) or
 left to **scale** with the dial, whose own endpoints and curve are settable too.
+A whole configuration can also come under one name: `--preset paper` is the
+Zhang & Sandholm setup ([SETTINGS.md § Presets](SETTINGS.md#presets)).
 
 ---
 
@@ -56,6 +58,7 @@ move selection — is inherited from §1.
 | `LEAF_CLAMP` | 1500 (cp) | material/eval scores are clamped to this so an imagined king capture from phantom hidden pieces can't swamp a real material decision |
 | `SEARCH_WIN` | 8000 (cp) | the search's terminal win/loss magnitude — chess's override of the generic `1e6`, deliberately bounded (~5.3× `LEAF_CLAMP`) because fog terminal values are *averaged* across belief worlds; unbounded win lets one phantom world dominate |
 | `MAX_SF_DEPTH` | 30 | ceiling of the iterative-deepening ladder (a ceiling to climb toward, not a depth usually reached — see `makeIterativeChessLeafEval`) |
+| `REFUSED_CHILD_CAP` | 8 | how many children of a node the engine refuses to score (the side not to move is "in check") get a real evaluation of their own, best static score first. Capped because refused nodes are ~10% of all nodes and pricing every child of each would multiply engine work ~4×. The `OBSCURO_REFUSED_CHILD_CAP` env var, which predates the settings system, is now just this parameter's *declared default* — the ordinary layers outrank it. |
 
 `KING_HANG` (= `SEARCH_WIN`) is the value assigned when a move leaves the
 mover's own king capturable — deliberately asymmetric with the `+LEAF_CLAMP`
@@ -142,6 +145,11 @@ Both α and β are the *initial* values: `setBeliefSampleAlpha` /
 `setBeliefReachWeighting` (and their per-seat variants, which is how the A/B
 harnesses run two models in one process) still win over a settings file.
 
+Both ship at 0, which is also **what the paper does** — it samples worlds
+uniformly from `P` and assumes every world in an information set is equally
+likely, having no model of the opponent. `--preset paper` pins them there
+alongside the rest of that setup ([SETTINGS.md](SETTINGS.md#presets)).
+
 **Heuristic particle belief (`src/belief.js`)** — used once exact
 tracking is lost:
 
@@ -171,6 +179,16 @@ on 37 recorded fog games (`fit-move-prior.mjs --write`), not hand-tuned**:
 | `promoWeight` | 0.651 | |
 | `pstWeight` | `[–, 4.252(P), 2.652(N), 4.115(B), 9.523(R), 2.064(Q), –0.853(K)]` | per-piece PST-delta weight. **King weight is negative on purpose** — under fog, players walk kings toward the centre, not the corner a normal midgame table rewards. |
 | `castleBonus` | 202.5 | the single biggest term in the fitted model |
+
+**`MOVE_PRIOR_UNIFORM`** — `false`. Serve the model-free baseline instead of the
+fitted model: every fog-legal move equally likely (`UNIFORM_PRIOR`). This is the
+paper's own setting — it samples uniformly from `P` and models nothing about how
+the opponent chooses — and it is the arm every measurement of this model is
+against, which is why it is a switch rather than something a caller has to
+reconstruct out of weights (`floor` cannot reach 1, and `temperature: Infinity`
+is not expressible in JSON). Note that at the shipped α = β = 0 the posterior
+reaches play through nothing at all, so on its own this changes the belief the
+analysis panel and `calibrate-belief.mjs` report, not the move.
 
 Do not hand-tune these — read the file's header (esp. the "SCAR TISSUE"
 section) before changing any of them. `belief.js`'s `THREAT_BIAS`/`MAX_LURKERS`
@@ -205,6 +223,16 @@ this package that no aggregate listed and nothing could override. Same numbers:
 | `fog.topK` | 6 – 10 | candidate-move prefilter width |
 | `fog.depthShallow` / `.depthDeep` / `.shallowBelow` | 1 / 2 / 0.2 | per-particle depth under fog: `depthShallow` below `t = 0.2`, `depthDeep` at or above |
 
+`CHESS_AGENT_SCORING` is the same story one step further: how this agent turns a
+cloud of particle scores into one number, and how it prices fog. Three `const`
+scalars until this table existed, so nothing could reach them either:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `pessimism` / `tailFraction` | 0.5 / 0.3 | the score is `pessimism` × (mean of the worst `tailFraction` of particles) + `(1−pessimism)` × (mean of all of them), so a move that hangs a piece in some plausible world is penalised without one paranoid particle vetoing every move |
+| `infoWeight` | 2 (cp per square) | bonus per square the move would reveal — encourages scouting. Kept well below a pawn so it only breaks ties. |
+| `fogClamp` | 1200 (cp) | per-particle score clamp under fog: big enough that losing a queen dominates losing a pawn, small enough that an imagined checkmate from phantom pieces can't swamp a concrete material decision (which was making the AI keep a hanging queen home rather than expose its king to ghosts) |
+
 ---
 
 ## 3. Adding or changing a parameter
@@ -229,3 +257,21 @@ this package that no aggregate listed and nothing could override. Same numbers:
    and `strength-belief.mjs` are the existing harnesses for exactly this, and
    `--set <NAME>=…` is how to sweep it without editing the default
    ([SETTINGS.md](SETTINGS.md#running-a-sweep)).
+
+**What is deliberately *not* a parameter.** Numbers that define the *model*
+rather than tune it stay `const`, because changing one invalidates something
+fitted against it:
+
+- `pieceTables.js` (`PIECE_VALUE`, `PST`) and the move prior's own king value of
+  1000 are **features**, shared by `fit-move-prior.mjs` and by serving. Making
+  one settable would let a host serve the fitted weights against a different
+  feature definition from the one they were fitted on — a train/serve skew with
+  no error message.
+- Encoding and memoisation internals (`exactBelief.js`'s Zobrist tables,
+  `stockfish.js`'s engine tag) are bookkeeping: they change how a value is
+  stored or keyed, not what it is.
+
+Everything else that changes what the AI plays, or how much work it does per
+move, is settable — including the two knobs a preset needs to state the paper's
+setup, which used to be reachable only through an env var
+(`REFUSED_CHILD_CAP`) or not at all (`CHESS_AGENT_SCORING`).

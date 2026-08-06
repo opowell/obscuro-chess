@@ -29,11 +29,13 @@ export {
   LEAF_CLAMP,
   SEARCH_WIN,
   MAX_SF_DEPTH,
+  REFUSED_CHILD_CAP,
 } from './ObscuroAgent.js';
 
 // src/ChessAgent.js — the plain alpha-beta agent's own difficulty ramp
-// (search depth, score noise, fog particle count).
-export { CHESS_AGENT_DIAL } from './ChessAgent.js';
+// (search depth, score noise, fog particle count) and how it prices a cloud of
+// particles (tail risk, the scouting bonus, the fog score clamp).
+export { CHESS_AGENT_DIAL, CHESS_AGENT_SCORING } from './ChessAgent.js';
 
 // src/belief.js — the heuristic particle belief (used once exact
 // tracking is lost; see exactBelief.js below for the primary tracker).
@@ -61,7 +63,12 @@ export {
 // turns the exact belief from a set into a distribution. FITTED_WEIGHTS is
 // the production model (fitted by MLE, not hand-tuned — see the file's own
 // header before changing any of its numbers).
-export { FITTED_WEIGHTS as MOVE_PRIOR_FITTED_WEIGHTS } from './movePrior.js';
+// MOVE_PRIOR_UNIFORM turns the model off entirely and serves the uniform
+// baseline instead — no opponent model, which is the paper's own setting.
+export {
+  FITTED_WEIGHTS as MOVE_PRIOR_FITTED_WEIGHTS,
+  UNIFORM_ONLY as MOVE_PRIOR_UNIFORM,
+} from './movePrior.js';
 
 // src/stockfish.js — the vendored-engine backend: cache/recycle
 // bookkeeping and the difficulty→(movetime, Skill Level) ramp used by the

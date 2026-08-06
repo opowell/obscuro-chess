@@ -4,12 +4,14 @@
 //
 // Two jobs:
 //
-//   1. SETTINGS FLAGS. --settings / --set / --print-config are understood
-//      identically everywhere, so any entry point can pin a parameter or
-//      reshape the difficulty dial without growing its own vocabulary:
+//   1. SETTINGS FLAGS. --preset / --settings / --set / --print-config are
+//      understood identically everywhere, so any entry point can pin a
+//      parameter, load a whole named configuration, or reshape the difficulty
+//      dial without growing its own vocabulary:
 //
 //        obscuro-chess demo --difficulty 60 --set chess.LEAF_CLAMP=900
 //        node scripts/move-quality.mjs --settings sweep.json --arm reach
+//        node scripts/move-quality.mjs --preset paper-design --games 40
 //
 //   2. ONE arg() HELPER. Four scripts each carried a verbatim copy of
 //        const arg = (n, d) => { const i = argv.indexOf('--' + n); ... }
@@ -22,7 +24,10 @@
 // back untouched, which is the whole requirement for a shared pre-pass.
 // ---------------------------------------------------------------------------
 
-import { loadSettings, setOverrides, setPath, formatConfig } from './config.js';
+import {
+  loadSettings, setOverrides, setPath, formatConfig, deepMerge, readSettingsFile,
+} from './config.js';
+import { preset, formatPresets } from './presets.js';
 
 /** The four-copies-in-four-scripts helper, once. */
 export function makeArgReader(argv) {
@@ -54,13 +59,14 @@ export function parseSetValue(raw) {
   try { return JSON.parse(raw); } catch { return raw; }
 }
 
-export const SETTINGS_FLAGS = ['--settings', '--set', '--print-config', '--print-changed'];
+export const SETTINGS_FLAGS = ['--preset', '--list-presets', '--settings', '--set',
+  '--print-config', '--print-changed'];
 
 /**
  * Consume the settings flags from argv and apply them.
  *
  * @param {string[]} [argv] defaults to process.argv.slice(2)
- * @returns {{rest: string[], printConfig: false|'all'|'changed'}}
+ * @returns {{rest: string[], printConfig: false|'all'|'changed'|'presets'}}
  *          `rest` is argv with the settings flags removed, ready for the
  *          caller's own parsing.
  */
@@ -69,11 +75,20 @@ export function applyCliSettings(argv = process.argv.slice(2)) {
   const overrides = {};
   let sawOverride = false;
   let settingsFile = null;
+  let presetName = null;
   let printConfig = false;
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--settings') {
+    if (a === '--preset' || a.startsWith('--preset=')) {
+      presetName = a === '--preset' ? argv[++i] : a.slice('--preset='.length);
+      if (presetName == null) throw new Error('--preset needs a name, e.g. --preset paper');
+    } else if (a === '--list-presets') {
+      // Rides the same "print what I am running" channel as --print-config
+      // rather than exiting here: an entry point decides what to do with it, and
+      // a parser that called process.exit could not be tested.
+      printConfig = 'presets';
+    } else if (a === '--settings') {
       settingsFile = argv[++i];
       if (settingsFile == null) throw new Error('--settings needs a path to a JSON file');
     } else if (a.startsWith('--settings=')) {
@@ -94,12 +109,20 @@ export function applyCliSettings(argv = process.argv.slice(2)) {
     }
   }
 
-  // Order matters: the file is the lower layer, --set the higher one.
-  // A bad key or a bad value is a user mistake at the command line, not a bug
-  // worth a stack trace — the message already says which key and what was
-  // expected, and (for a near miss) what was probably meant.
+  // Order matters: the preset is the lowest of the three, then the file, then
+  // --set — so `--preset paper --set chess.SEARCH_WIN=8000` is "the paper's setup
+  // except for this one knob", which is the shape a sweep over a preset takes.
+  // The preset and the file share ONE settings layer (loadSettings), so the
+  // merge happens here rather than by stacking two layers.
+  //
+  // A bad key, a bad value or an unknown preset is a user mistake at the command
+  // line, not a bug worth a stack trace — the message already says which key and
+  // what was expected, and (for a near miss) what was probably meant.
   try {
-    if (settingsFile) loadSettings(settingsFile);
+    const base = presetName ? preset(presetName) : null;
+    if (base && settingsFile) loadSettings(deepMerge(base, readSettingsFile(settingsFile)));
+    else if (base) loadSettings(base);
+    else if (settingsFile) loadSettings(settingsFile);
     if (sawOverride) setOverrides(overrides);
   } catch (err) {
     if (!String(err.message).startsWith('settings:')) throw err;
@@ -110,15 +133,23 @@ export function applyCliSettings(argv = process.argv.slice(2)) {
   return { rest, printConfig };
 }
 
-/** Print the resolved configuration if --print-config/--print-changed was given. */
+/**
+ * Print the resolved configuration if --print-config/--print-changed was given,
+ * or the shipped presets for --list-presets. Returns whether anything was
+ * printed, which is how a caller knows to separate it from its own output.
+ */
 export async function maybePrintConfig(printConfig) {
   if (!printConfig) return false;
+  if (printConfig === 'presets') { console.log(formatPresets()); return true; }
   console.log(await formatConfig({ changedOnly: printConfig === 'changed' }));
   return true;
 }
 
 export const SETTINGS_USAGE = `
 Settings flags (understood by every command):
+  --preset <name>       load a named configuration (--list-presets to see them)
+                        e.g. --preset paper       the Zhang & Sandholm setup
+  --list-presets        print the shipped presets, with their aliases
   --settings <file>     load a JSON settings file (see docs/SETTINGS.md)
   --set <path>=<value>  override one parameter; repeatable
                         e.g. --set chess.LEAF_CLAMP=900

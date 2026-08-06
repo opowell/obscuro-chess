@@ -57,7 +57,7 @@
 // literally knows the true position.
 // ---------------------------------------------------------------------------
 
-import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from './movePrior.js';
+import { makeMovePrior, UNIFORM_PRIOR, UNIFORM_ONLY, FITTED_WEIGHTS } from './movePrior.js';
 import { param, settingsEpoch } from './config.js';
 
 // Exported so src/settings.js can list them; kept defined here,
@@ -115,8 +115,13 @@ export function setDefaultMovePrior(prior) {
 export function getDefaultMovePrior() {
   if (defaultPrior && defaultPriorEpoch >= settingsEpoch()) return defaultPrior;
   defaultPriorEpoch = settingsEpoch();
+  if (uniformOnly()) return defaultPrior = UNIFORM_PRIOR;
   return defaultPrior = makeMovePrior(param('chess.MOVE_PRIOR_FITTED_WEIGHTS', FITTED_WEIGHTS));
 }
+
+// `chess.MOVE_PRIOR_UNIFORM` — serve the model-free baseline instead of the
+// fitted model (see movePrior.js's UNIFORM_ONLY).
+const uniformOnly = () => param('chess.MOVE_PRIOR_UNIFORM', UNIFORM_ONLY);
 
 // Per-seat override, for A/B harnesses that need one seat's belief to run a
 // different model from the other's IN THE SAME PROCESS — which is what a

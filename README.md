@@ -86,6 +86,20 @@ stack in that order. The `search.*` half is forwarded to
 [obscuro-ai's own settings layer](vendor/obscuro/docs/SETTINGS.md), which owns
 those parameters. Full reference: [docs/SETTINGS.md](docs/SETTINGS.md).
 
+A whole configuration can also come under one name:
+
+```sh
+obscuro-chess config --preset paper --print-changed   # the Zhang & Sandholm setup
+```
+
+`--preset paper` puts back every parameter this engine measured *away* from the
+paper's design point at JavaScript tree sizes — depth-1 leaf evaluation, bounded
+utilities, `|P| ≤ 10⁶`, no opponent model, hundreds of belief worlds — each with
+the paper claim it rests on cited at its value in
+[`src/presets.js`](src/presets.js). It is the arm to measure against, not a
+recommendation: several of those choices are measurably worse here, which is why
+the defaults are what they are.
+
 ## The belief is the interesting part
 
 Under fog the search is only as good as the belief feeding it, so the belief is
@@ -132,7 +146,8 @@ src/
   playMatch.js          a minimal self-play loop for the scripts and the demo
   settings.js           every fog-chess default, in one place
   config.js             settings resolution: fix a parameter, or reshape the dial
-  cli.js                shared --settings / --set / --print-config handling
+  presets.js            named configurations, notably the Zhang & Sandholm setup
+  cli.js                shared --preset / --settings / --set / --print-config handling
 bin/obscuro-chess.js    demo, the tuning harnesses and `config`, in one command
 vendor/obscuro/         the generic search (submodule: opowell/obscuro-ai)
 vendor/stockfish/       Stockfish 18 lite, single-threaded WASM

@@ -317,19 +317,27 @@ function chessConfigForDifficulty(difficulty) {
   };
 }
 
-// Weight on tail risk when aggregating a move's score across particles. The
-// score is a blend of the mean outcome and the average of the worst-30% of
-// particles, so a move that hangs a piece in some plausible world is penalised
-// without one paranoid particle vetoing every move.
-const PESSIMISM = 0.5;
-// Small bonus per square the move would reveal — encourages scouting to shrink
-// future uncertainty. Kept well below a pawn (100) so it only breaks ties.
-const INFO_WEIGHT = 2;
-// Per-particle score clamp (centipawns) under fog. Big enough that losing a
-// queen still dominates losing a pawn, small enough that an imagined checkmate
-// from phantom hidden pieces can't swamp a concrete material decision (which was
-// making the AI keep a hanging queen home rather than expose its king to ghosts).
-const FOG_CLAMP = 1200;
+// How this agent turns a cloud of particle scores into one number, and how it
+// prices fog. Three `const` scalars until this table existed, which made them —
+// like CHESS_AGENT_DIAL above — knobs no aggregate listed and nothing could
+// override, even though every one of them changes what the agent plays.
+export const CHESS_AGENT_SCORING = {
+  // Weight on tail risk when aggregating a move's score across particles. The
+  // score is a blend of the mean outcome and the average of the worst
+  // `tailFraction` of particles, so a move that hangs a piece in some plausible
+  // world is penalised without one paranoid particle vetoing every move.
+  pessimism: 0.5,
+  tailFraction: 0.3,
+  // Small bonus per square the move would reveal — encourages scouting to shrink
+  // future uncertainty. Kept well below a pawn (100) so it only breaks ties.
+  infoWeight: 2,
+  // Per-particle score clamp (centipawns) under fog. Big enough that losing a
+  // queen still dominates losing a pawn, small enough that an imagined checkmate
+  // from phantom hidden pieces can't swamp a concrete material decision (which was
+  // making the AI keep a hanging queen home rather than expose its king to ghosts).
+  fogClamp: 1200,
+};
+const scoring = () => param('chess.CHESS_AGENT_SCORING', CHESS_AGENT_SCORING);
 
 // ---------------------------------------------------------------------------
 // Minimax with alpha-beta pruning, used to evaluate a move inside a single
@@ -409,18 +417,19 @@ export function scoreMoveInParticle(particleBoard, gs, aiColor, move, depth, use
   return alphaBeta(nb, ngs, opp, aiColor, depth - 1, -Infinity, Infinity, FULL_INFO_CFG, useQuiesce);
 }
 
-// Blend the mean outcome with the average of the worst-30% of particles. With a
-// single particle this is just that particle's score.
+// Blend the mean outcome with the average of the worst particles (the tail). With
+// a single particle this is just that particle's score.
 function aggregateScores(scores) {
   if (scores.length === 0) return 0;
   if (scores.length === 1) return scores[0];
+  const { pessimism, tailFraction } = scoring();
   const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
   const sorted = [...scores].sort((a, b) => a - b);
-  const k = Math.max(1, Math.ceil(sorted.length * 0.3));
+  const k = Math.max(1, Math.ceil(sorted.length * tailFraction));
   let tail = 0;
   for (let i = 0; i < k; i++) tail += sorted[i];
   tail /= k;
-  return PESSIMISM * tail + (1 - PESSIMISM) * mean;
+  return pessimism * tail + (1 - pessimism) * mean;
 }
 
 // ---------------------------------------------------------------------------
@@ -522,8 +531,9 @@ export const ChessAgent = {
     belief.beginTurn(board, state.turnNumber ?? null);
     let particles = belief.sample(board, cfg.fog.particles);
     if (particles.length === 0) particles = [board]; // fallback: trust the visible board
+    const { infoWeight, fogClamp } = scoring();
     const action = search(board, gameSpecific, color, legalActions, particles, {
-      depth: cfg.fog.depth, useQuiesce: cfg.useQuiesce, noise: cfg.noise, topK: cfg.fog.topK, infoWeight: INFO_WEIGHT, clamp: FOG_CLAMP,
+      depth: cfg.fog.depth, useQuiesce: cfg.useQuiesce, noise: cfg.noise, topK: cfg.fog.topK, infoWeight, clamp: fogClamp,
     });
     belief.commitOurMove(action, board);
     return action;
@@ -581,8 +591,9 @@ export const ChessAgent = {
     belief.beginTurn(board, state.turnNumber ?? null);
     let particles = belief.sample(board, opts.particles ?? cfg.fog.particles);
     if (particles.length === 0) particles = [board];
+    const { infoWeight, fogClamp } = scoring();
     const scored = scoreAllCandidates(board, gameSpecific, color, legalActions, particles, {
-      depth: cfg.fog.depth, useQuiesce: cfg.useQuiesce, topK: cfg.fog.topK, infoWeight: INFO_WEIGHT, clamp: FOG_CLAMP,
+      depth: cfg.fog.depth, useQuiesce: cfg.useQuiesce, topK: cfg.fog.topK, infoWeight, clamp: fogClamp,
     });
     return { engine: 'chess-ai', mode: 'fog-minimax', candidates: scored.map(({ move, score }) => ({ move, cp: score })) };
   },

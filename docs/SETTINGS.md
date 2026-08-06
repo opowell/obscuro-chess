@@ -9,6 +9,9 @@ Two ways to change what the AI does. They are the same mechanism.
    curve}` endpoints it ramps over, or the exponent of its convex ramp
    (`search.DIAL_CONVEX_EXPONENT`).
 
+A **[preset](#presets)** is a named bundle of the first: `--preset paper` loads
+the whole Zhang & Sandholm configuration through this same layer.
+
 ```jsonc
 // obscuro-chess.settings.json
 {
@@ -64,6 +67,70 @@ the fitted model.
 
 ---
 
+## Presets
+
+A preset is a whole configuration under one name, written in exactly the keys
+above. They live in [`src/presets.js`](../src/presets.js) — a module rather than
+a JSON file, so each value can carry the citation that justifies it.
+
+```sh
+obscuro-chess config --list-presets
+obscuro-chess config --preset paper --print-changed     # what does it actually set?
+obscuro-chess demo --preset paper-design --difficulty 60
+node scripts/move-quality.mjs --preset paper-design --games 40
+```
+
+| Preset | What it is |
+|---|---|
+| `zhang-sandholm` (alias `paper`) | the paper's setup: its design points **and** its scale — hundreds of belief worlds, a ~10⁶-node tree cap, seconds per move |
+| `zhang-sandholm-design` (alias `paper-design`) | the same design points at this engine's own search budget — the arm to measure, since it changes what the engine believes and how it prices leaves without changing how much search it buys |
+
+### What the Zhang & Sandholm preset changes, and why
+
+The vendored search implements the paper's algorithm — GT-CFR growth, PCFR+, the
+KLUSS gadget, purification. What this repo changed is the **settings** around it,
+each time a measurement disagreed with the paper's design point at ~100× smaller
+trees. The preset puts those back:
+
+| Key | Preset | Shipped | The paper claim it rests on |
+|---|---|---|---|
+| `chess.CHESS_DIAL.leafEval.sfDepth` | 1 | 2–4 | leaf evaluation runs at **depth 1** (App. C.5); strength comes from aggregating worlds and growing the tree |
+| `chess.CHESS_DIAL.leafEval.cols` | 0 | 5–14 | price exactly the node's children (`cols` is a floor on MultiPV, not a cap) |
+| `chess.MAX_SF_DEPTH` | 1 | 30 | the same design point for a per-move time limit, where the ladder replaces the dial |
+| `chess.SEARCH_WIN` | 1500 | 8000 | utilities are bounded, `u: Z → [−1,+1]`, with evals clamped inside — so a certain win is worth the eval clamp, not 5.3× it |
+| `chess.EXACT_BELIEF_CAP` | 10⁶ | 200,000 | `\|P\|` usually ≤ 10⁶ in the paper's C++ tracker (`TIME_GUARD_MS` rises with it, or the guard decides instead of the cap) |
+| `chess.SAMPLE_ALPHA_DEFAULT` / `REACH_WEIGHTING_DEFAULT` | 0 / 0 | 0 / 0 | worlds are "sampled at random without replacement from the set of possible states", and every world in an information set is equally likely |
+| `chess.MOVE_PRIOR_UNIFORM` | `true` | `false` | the paper has **no opponent model**; the fitted move prior is this repo's addition |
+| `search.PURIFY_MAX_SUPPORT`, `DIAL.*.purifyMax` | 3 | 3 | MaxSupport = 3 (§3.5 / App. C.8) |
+| `search.DIAL.power.worlds` / `.maxInfosets` / `.timeBudgetMs` / `.maxRounds` | 100 / 10⁶ / 5000 / unbounded | 1–48 / 400–6000 / 30–2000 / 6–100 | "hundreds of worlds", "~10⁶-node trees", "seconds/move", and a solver that runs until the clock rather than a round cap — **`zhang-sandholm` only** |
+
+Three things worth knowing before you read a result:
+
+- **The preset pins values that already agree with the default** (α, β,
+  MaxSupport). It is a statement of a configuration, not a diff against this
+  week's defaults.
+- **It is a reference point, not a recommendation.** Several of these choices are
+  measurably worse *here*: depth-1 leaves cost 108.9 → 142.3 cp on 128 matched
+  positions, and equalising `SEARCH_WIN` with the clamp gives up the asymmetric
+  own-king-hang penalty that fixed a real failure (the AI walking its king onto a
+  square a hidden pawn covered).
+- **Where the paper gives a mechanism but no number, the preset leaves the
+  parameter alone** — `safePmaxThreshold`, `stableSnapshotEps`,
+  `RESOLVE_PRIOR_UNIFORM_BLEND` and the other implementation guards. `presets.js`
+  lists those explicitly, so "not set" reads as a decision rather than an
+  oversight.
+
+From code:
+
+```js
+import { PRESETS, preset, loadPreset, mergeSettings } from 'obscuro-chess';
+
+loadPreset('paper');                                  // = loadSettings(preset('paper'))
+loadSettings(mergeSettings(preset('paper'), mine));   // a preset with your own layer on top
+```
+
+---
+
 ## Where a value can come from
 
 Lowest precedence first. Anything not set anywhere falls through to the
@@ -74,6 +141,7 @@ constant declared next to the code it tunes.
 | built-in default | the constant in `src/*.js` | — |
 | `./obscuro-chess.settings.json` | present in the working directory | process |
 | `$OBSCURO_CHESS_SETTINGS` | a path to a JSON file | process |
+| `--preset <name>` / `loadPreset(name)` | a named configuration | process |
 | `--settings <file>` / `loadSettings(path \| object)` | explicit | process |
 | `--set path=value` / `setOverrides(tree)` | explicit | process |
 | `gameSpecific.obscuro` | `createInitialState(players, { obscuro: {…} })` | one game |
@@ -93,13 +161,20 @@ give each its own knobs.
 Resolution happens at **read time**, per move — which is what lets a host
 configure the singleton after importing it.
 
+A preset and `--settings` share **one** layer (`loadSettings`): given both, the
+CLI merges them, preset underneath. So `--preset paper --set chess.SEARCH_WIN=8000`
+is "the paper's setup except for this one knob", which is the shape a sweep over
+a preset takes.
+
 ---
 
 ## Command line
 
-Every command understands the same four flags.
+Every command understands the same six flags.
 
 ```
+--preset <name>       load a named configuration (see Presets)
+--list-presets        print the shipped presets, with their aliases
 --settings <file>     load a JSON settings file
 --set <path>=<value>  override one parameter; repeatable
 --print-config        every parameter, its value, and where it came from
@@ -109,6 +184,7 @@ Every command understands the same four flags.
 ```sh
 obscuro-chess config                                  # what am I running?
 obscuro-chess config --settings sweep.json --print-changed
+obscuro-chess config --preset paper --print-changed
 
 obscuro-chess demo --difficulty 60 --set search.DIAL.power.worlds=8
 obscuro-chess move-quality --arm reach --set chess.EXACT_BELIEF_CAP=500000
@@ -157,6 +233,10 @@ values in this repo measured *worse*).
 for cap in 100000 200000 500000; do
   obscuro-chess move-quality --set chess.EXACT_BELIEF_CAP=$cap --games 40
 done
+
+# the paper's design points against the shipped defaults, same search budget
+obscuro-chess move-quality --games 40
+obscuro-chess move-quality --preset paper-design --games 40
 ```
 
 Two things worth knowing before you trust the numbers:

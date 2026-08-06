@@ -50,13 +50,19 @@
 // ---------------------------------------------------------------------------
 
 import {
-  createSettingsStore, LEAF, flatten, deepMerge, setPath as setTreePath, ramp as rampSpec,
+  createSettingsStore, LEAF, flatten, deepMerge, readJsonFile,
+  setPath as setTreePath, ramp as rampSpec,
   SETTING_PATHS as SEARCH_SETTING_PATHS,
   setOverrides as setSearchOverrides,
   resetSettings as resetSearchSettings,
 } from '../vendor/obscuro/src/config.js';
 
 export { setTreePath as setPath };
+// Re-exported (rather than imported from vendor/obscuro by every caller) so a
+// host merging two settings trees — a preset under a file, say — uses the SAME
+// merge the settings layer itself applies between layers, and reads a settings
+// file with the same errors. See src/presets.js and src/cli.js.
+export { deepMerge, readJsonFile as readSettingsFile };
 
 export const SETTINGS_FILENAME = 'obscuro-chess.settings.json';
 export const SETTINGS_ENV_VAR = 'OBSCURO_CHESS_SETTINGS';
@@ -77,7 +83,7 @@ export const SETTINGS_ENV_VAR = 'OBSCURO_CHESS_SETTINGS';
 // settings.js aggregates' export lists, so a new constant cannot be added
 // upstream or here without also becoming settable.
 // ---------------------------------------------------------------------------
-const { number: n, string: s, dial: d, any } = LEAF;
+const { number: n, boolean: b, string: s, dial: d, any } = LEAF;
 
 export const SETTING_PATHS = {
   // vendor/obscuro/src/settings.js — the generic search. Taken from upstream
@@ -105,10 +111,12 @@ export const SETTING_PATHS = {
     LEAF_CLAMP: n,
     SEARCH_WIN: n,
     MAX_SF_DEPTH: n,
+    REFUSED_CHILD_CAP: n,
     CHESS_AGENT_DIAL: {
       depth: d, noiseCp: n, noiseZeroAt: n, quiesceFrom: n,
       fog: { particles: d, topK: d, depthShallow: n, depthDeep: n, shallowBelow: n },
     },
+    CHESS_AGENT_SCORING: { pessimism: n, tailFraction: n, infoWeight: n, fogClamp: n },
     // belief.js — the heuristic particle belief.
     MAX_POSSIBLE: n, THREAT_BIAS: n, MAX_LURKERS: n,
     RECAPTURE_TYPE_WEIGHT: { pawn: n, knight: n, bishop: n, rook: n, queen: n, king: n },
@@ -119,6 +127,8 @@ export const SETTING_PATHS = {
     // movePrior.js — π(move | position). Deep-merged onto the fitted model;
     // read movePrior.js's header before touching these.
     MOVE_PRIOR_FITTED_WEIGHTS: any,
+    // …or no opponent model at all: uniform π, which is the paper's setting.
+    MOVE_PRIOR_UNIFORM: b,
     // stockfish.js — the vendored engine backend.
     RECYCLE_AFTER: n, CACHE_MAX: n, STOP_POLL_MS: n, SF_CACHE_DIR: s,
     LEGACY_DIFFICULTY: { easy: n, medium: n, hard: n, expert: n },
