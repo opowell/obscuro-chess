@@ -41,13 +41,26 @@
 // saying the paper's thing, and `--print-changed` should read as "this is the
 // paper's setup" rather than "here is what happens to differ this week".
 //
-// THIS PRESET IS A REFERENCE POINT, NOT A RECOMMENDATION. Several of these
-// choices are measurably WORSE in this engine — depth-1 leaves cost 142.3 cp
-// against 108.9 at the shipped depth 2 on 128 matched positions
-// (ObscuroAgent.js `_leafEval`), and bounding a win at the eval clamp gives up
-// the asymmetric own-king-hang penalty that fixed a real failure (the AI walking
-// its king onto a square a hidden pawn covered). That is the point: it is the
-// arm you measure against, with `move-quality.mjs` / `strength-belief.mjs`.
+// THIS PRESET IS A REFERENCE POINT, NOT A RECOMMENDATION — and how much worse it
+// plays is, as of 2026-08-07, NOT MEASURED. Two different kinds of claim sit
+// behind that:
+//
+//   • Bounding a win at the eval clamp gives up the asymmetric own-king-hang
+//     penalty, and that penalty exists because of an observed failure — the AI
+//     walking its king onto a square a hidden pawn covered. Scar tissue, not a
+//     benchmark, so it stands on its own.
+//   • The leaf-depth argument used to cite `move-quality.mjs --grid`: depth 1 at
+//     142.3 cp against 108.9 at the shipped depth 2. THAT NUMBER IS VOID, along
+//     with every move-quality figure from before 2026-08-07 — the harness
+//     advanced the belief with a move the agent had not played, P died on ply 2,
+//     and both arms ran on the heuristic particle fallback
+//     (docs/PARAMETERS.md §2.4.1). The shipped 2–4 range and this preset's 1 have
+//     never been compared on a working belief.
+//
+// So the honest status is that the preset is the arm to measure, and the
+// measurement is outstanding: `move-quality.mjs --preset paper-design` against a
+// default run, on the repaired harness, which now reports the share of positions
+// still holding an exact |P|.
 // ---------------------------------------------------------------------------
 
 import { loadSettings, deepMerge } from './config.js';

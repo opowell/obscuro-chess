@@ -109,11 +109,15 @@ Three things worth knowing before you read a result:
 - **The preset pins values that already agree with the default** (α, β,
   MaxSupport). It is a statement of a configuration, not a diff against this
   week's defaults.
-- **It is a reference point, not a recommendation.** Several of these choices are
-  measurably worse *here*: depth-1 leaves cost 108.9 → 142.3 cp on 128 matched
-  positions, and equalising `SEARCH_WIN` with the clamp gives up the asymmetric
-  own-king-hang penalty that fixed a real failure (the AI walking its king onto a
-  square a hidden pawn covered).
+- **It is a reference point, not a recommendation — and how much worse it plays is
+  not measured.** Equalising `SEARCH_WIN` with the clamp gives up the asymmetric
+  own-king-hang penalty, which exists because of an observed failure (the AI
+  walking its king onto a square a hidden pawn covered), so that one stands on its
+  own. The depth-1 argument used to cite `move-quality.mjs --grid`, but every
+  move-quality number before 2026-08-07 is void — the harness advanced the belief
+  with a move the agent never played, so both arms ran on the particle fallback
+  ([PARAMETERS.md §2.4.1](PARAMETERS.md)). Running `--preset paper-design` against
+  a default run on the repaired harness is the missing measurement.
 - **Where the paper gives a mechanism but no number, the preset leaves the
   parameter alone** — `safePmaxThreshold`, `stableSnapshotEps`,
   `RESOLVE_PRIOR_UNIFORM_BLEND` and the other implementation guards. `presets.js`
