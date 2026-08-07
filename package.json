@@ -55,6 +55,7 @@
     "demo": "node bin/obscuro-chess.js demo",
     "calibrate": "node bin/obscuro-chess.js calibrate",
     "fit-prior": "node bin/obscuro-chess.js fit-prior",
+    "adopt-corpus": "node bin/obscuro-chess.js adopt-corpus",
     "move-quality": "node bin/obscuro-chess.js move-quality",
     "strength": "node bin/obscuro-chess.js strength"
   },

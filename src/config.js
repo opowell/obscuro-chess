@@ -127,6 +127,11 @@ export const SETTING_PATHS = {
     // movePrior.js — π(move | position). Deep-merged onto the fitted model;
     // read movePrior.js's header before touching these.
     MOVE_PRIOR_FITTED_WEIGHTS: any,
+    // …and the optional per-rating SLOPE layered over it (weight_k(r) = base +
+    // slope_k·z). A host that fitted its own corpus supplies it here, along with
+    // the pivot/scale/clamp that define z in ITS corpus's units.
+    MOVE_PRIOR_RATING_SLOPE: any,
+    MOVE_PRIOR_RATING_PIVOT: n, MOVE_PRIOR_RATING_SCALE: n, MOVE_PRIOR_RATING_Z_CLAMP: n,
     // …or no opponent model at all: uniform π, which is the paper's setting.
     MOVE_PRIOR_UNIFORM: b,
     // stockfish.js — the vendored engine backend.

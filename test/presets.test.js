@@ -18,7 +18,10 @@ import { applyCliSettings } from '../src/cli.js';
 import { FogChess } from '../src/FogChess.js';
 import { ChessObscuroAgent, SEARCH_WIN, LEAF_CLAMP, MAX_SF_DEPTH } from '../src/ObscuroAgent.js';
 import { getDefaultMovePrior } from '../src/exactBelief.js';
-import { UNIFORM_PRIOR, UNIFORM_ONLY } from '../src/movePrior.js';
+import {
+  UNIFORM_PRIOR, UNIFORM_ONLY, FITTED_WEIGHTS, weightsForRating,
+  RATING_PIVOT, RATING_SCALE, RATING_Z_CLAMP,
+} from '../src/movePrior.js';
 import { CHESS_AGENT_SCORING } from '../src/ChessAgent.js';
 import { quit as stockfishQuit } from '../src/stockfish.js';
 
@@ -159,11 +162,36 @@ test('a preset lands in the settings tree, not in a code path of its own', () =>
 // The parameters this preset needed, which used to be unreachable
 // ---------------------------------------------------------------------------
 
-test('MOVE_PRIOR_UNIFORM is off by default and reaches the compiled prior', () => {
+test('MOVE_PRIOR_UNIFORM outranks a rating-tilted model', () => {
+  // Both compile paths check it (getDefaultMovePrior and priorFor), so turning
+  // the model off cannot leave a rating-tilted fitted prior serving one seat —
+  // which is what would happen if only the default path honoured it.
   assert.equal(param('chess.MOVE_PRIOR_UNIFORM', UNIFORM_ONLY), false, 'off by default');
-  applyCliSettings(['--preset', 'paper-design']);
+  applyCliSettings(['--preset', 'paper-design',
+    '--set', 'chess.MOVE_PRIOR_RATING_SLOPE=[1,0,0,0,0,0,0,0,0]']);
   assert.equal(param('chess.MOVE_PRIOR_UNIFORM', UNIFORM_ONLY), true);
   assert.equal(getDefaultMovePrior(), UNIFORM_PRIOR);
+});
+
+test('the rating line reads its pivot, scale and clamp from settings', () => {
+  // The slopes a host serves were fitted against a particular pivot/scale/clamp;
+  // serving them under this package's numbers evaluates the line in the wrong
+  // units, which is why all four are settable rather than just the slopes.
+  const slope = [1, 0, 0, 0, 0, 0, 0, 0, 0];   // capture weight, +1 per z
+  const at = r => weightsForRating(r, { slope }).captureWeight;
+  const base = FITTED_WEIGHTS.captureWeight;
+
+  assert.equal(RATING_PIVOT, 2000);
+  assert.equal(RATING_SCALE, 400);
+  assert.equal(RATING_Z_CLAMP, 1.5);
+  assert.ok(Math.abs(at(2400) - (base + 1)) < 1e-9, 'one scale above the pivot is z = 1');
+  assert.ok(Math.abs(at(4000) - (base + 1.5)) < 1e-9, 'z is clamped, not extrapolated');
+
+  applyCliSettings(['--set', 'chess.MOVE_PRIOR_RATING_PIVOT=2400',
+    '--set', 'chess.MOVE_PRIOR_RATING_SCALE=200',
+    '--set', 'chess.MOVE_PRIOR_RATING_Z_CLAMP=3']);
+  assert.ok(Math.abs(at(2400) - base) < 1e-9, 'the new pivot is z = 0');
+  assert.ok(Math.abs(at(3000) - (base + 3)) < 1e-9, 'the new scale and clamp both apply');
 });
 
 test('the alpha-beta agent\'s scoring knobs are settable and deep-merged', () => {

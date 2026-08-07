@@ -57,7 +57,9 @@
 // literally knows the true position.
 // ---------------------------------------------------------------------------
 
-import { makeMovePrior, UNIFORM_PRIOR, UNIFORM_ONLY, FITTED_WEIGHTS } from './movePrior.js';
+import {
+  makeMovePrior, UNIFORM_PRIOR, UNIFORM_ONLY, FITTED_WEIGHTS, RATING_SLOPE, weightsForRating,
+} from './movePrior.js';
 import { param, settingsEpoch } from './config.js';
 
 // Exported so src/settings.js can list them; kept defined here,
@@ -120,7 +122,8 @@ export function getDefaultMovePrior() {
 }
 
 // `chess.MOVE_PRIOR_UNIFORM` — serve the model-free baseline instead of the
-// fitted model (see movePrior.js's UNIFORM_ONLY).
+// fitted model (see movePrior.js's UNIFORM_ONLY). Checked on both compile paths,
+// so turning it on cannot leave a rating-tilted fitted prior serving one seat.
 const uniformOnly = () => param('chess.MOVE_PRIOR_UNIFORM', UNIFORM_ONLY);
 
 // Per-seat override, for A/B harnesses that need one seat's belief to run a
@@ -129,6 +132,63 @@ const uniformOnly = () => param('chess.MOVE_PRIOR_UNIFORM', UNIFORM_ONLY);
 const priorBySeat = new Map();
 export function setMovePriorForSeat(color, prior) {
   if (prior) priorBySeat.set(color, prior); else priorBySeat.delete(color);
+}
+
+// --- rating-conditioned π ----------------------------------------------------
+//
+// π models THE OPPONENT, so the rating that selects a band is the opponent's,
+// never ours. A host supplies it either as `gameSpecific.opponentRating` or as a
+// `rating` on the opposing player in `state.players`; both are optional and both
+// are inert until RATING_WEIGHTS is non-empty, which it is not until someone
+// fits bands that earn their place (see movePrior.js).
+//
+// Compiled priors are cached for the same reason the default one is, keyed on
+// the settings epoch so a sweep over the weights is not silently measuring the
+// first arm k times. Rating is continuous, so the cache key is the rating
+// ROUNDED TO 25 Elo — that is a cache granularity and nothing else: the model is
+// a line, and 25 Elo moves a weight by well under a percent. The cache is
+// bounded because a long-lived host meets unboundedly many opponents.
+const RATING_CACHE_STEP = 25;
+const RATING_CACHE_MAX = 64;
+const priorByRating = new Map();
+let priorByRatingEpoch = -1;
+
+function ratingOfOpponent(state, aiColor) {
+  const gs = state?.gameSpecific;
+  const opponent = aiColor === 'white' ? 'black' : 'white';
+  const explicit = gs?.opponentRating ?? gs?.ratings?.[opponent];
+  if (typeof explicit === 'number' && Number.isFinite(explicit)) return explicit;
+  for (const pl of state?.players ?? []) {
+    const id = pl.id ?? pl.playerId;
+    if (id !== opponent) continue;
+    const r = pl.rating ?? pl.elo;
+    if (typeof r === 'number' && Number.isFinite(r)) return r;
+  }
+  return null;
+}
+
+/** The π this seat should run against this opponent, rating-adjusted if possible. */
+function priorFor(state, aiColor) {
+  const override = priorBySeat.get(aiColor);
+  if (override) return override;
+  if (uniformOnly()) return null;                // null → the (uniform) default
+  const slope = param('chess.MOVE_PRIOR_RATING_SLOPE', RATING_SLOPE);
+  if (!slope?.some(x => x !== 0)) return null;   // null → ExactBelief takes the default
+  const rating = ratingOfOpponent(state, aiColor);
+  if (rating == null) return null;
+  // The base must be the RESOLVED pooled weights, not the raw constant, so a
+  // host that overrode chess.MOVE_PRIOR_FITTED_WEIGHTS gets its own numbers
+  // tilted by rating rather than the package's.
+  const base = param('chess.MOVE_PRIOR_FITTED_WEIGHTS', FITTED_WEIGHTS);
+  const key = Math.round(rating / RATING_CACHE_STEP) * RATING_CACHE_STEP;
+  if (priorByRatingEpoch !== settingsEpoch()) { priorByRating.clear(); priorByRatingEpoch = settingsEpoch(); }
+  let prior = priorByRating.get(key);
+  if (!prior) {
+    if (priorByRating.size >= RATING_CACHE_MAX) priorByRating.clear();
+    prior = makeMovePrior(weightsForRating(key, { base, slope }));
+    priorByRating.set(key, prior);
+  }
+  return prior;
 }
 
 // Exponent applied to the posterior when SAMPLING search worlds: draw ∝ w^α.
@@ -159,6 +219,26 @@ export function setMovePriorForSeat(color, prior) {
 // the search looks at ~16 worlds, so α = 1 concentrates a sample smaller than the
 // uncertainty it is concentrating over. Raising α needs a higher-powered strength
 // measurement than the harness currently gives (see its header) — not this comment.
+//
+// 2026-08-07: THE MOVE-QUALITY EVIDENCE FOR α = 0 IS GONE, AND NOW LEANS THE OTHER
+// WAY. The "+2.96 ± 2.62 cp in favour of α=0" that used to be quoted here and in
+// the README was measured through a harness that killed the exact belief on ply 2
+// (see scripts/move-quality.mjs), so both arms were sampling the heuristic
+// fallback and α was not being varied at all. Remeasured on a live P over 2,044
+// paired positions from 40 corpus games: −0.86 ± 1.66 cp and a sign test of 52.4%
+// (z = 1.53), i.e. a mild lean TOWARD α = 1, still short of 2σ.
+//
+// The self-play number above (4–11) is NOT affected — strength-belief.mjs plays
+// the move it chooses, so there is no double commit — and it still points at
+// α = 0 off 15 decisive games. So the two harnesses now disagree in direction,
+// and the honest state is that α is UNRESOLVED rather than settled. It stays at 0
+// because that is the option that changes nothing, not because the case is made.
+//
+// The dilution defence has been tested and does not explain it: |P| is recorded at
+// every decision and the paired difference regressed on it, and there is no
+// relationship (rank(|P|) t = +0.87 on the sign model, log10|P| t = −0.39). The
+// one significant-looking fit — raw |P|, t = −3.47 — is carried entirely by the
+// largest ~5% of |P| and reverses sign when they are dropped (t = +0.79).
 export const SAMPLE_ALPHA_DEFAULT = 0;
 // null = nobody called the setter, so follow the settings layer (which itself
 // falls back to the constant above). Keeping "unset" distinct from "set to the
@@ -187,12 +267,19 @@ export function setBeliefSampleAlphaForSeat(color, a) {
 // affect a single move. That is also why raising α measured as nothing: it moved
 // worlds between two uniform treatments.
 //
-// SHIPPED OFF, on a measurement that leans against it. 1,420 paired positions
-// (move-quality.mjs --arm reach): mean +24.4 ± 18.9 cp and a sign test of 46.8%
-// (z = 1.30 and −1.29) — both pointing at uniform reach being BETTER, neither at
-// 2σ. Off is also the option that changes nothing, which is how the two previous
-// belief knobs (τ<60, α=1) were settled after the principled choice measured
-// worse.
+// SHIPPED OFF, on a measurement that leans against it — REMEASURED 2026-08-07
+// after the harness bug below, and the verdict survived. 2,044 paired positions,
+// 40 corpus games (move-quality.mjs --arm reach): mean +2.25 ± 1.61 cp and a sign
+// test of 47.1% (z = 1.40 and −1.83), both pointing at uniform reach being
+// BETTER, neither at 2σ. Off is also the option that changes nothing, which is
+// how the two previous belief knobs (τ<60, α=1) were settled after the principled
+// choice measured worse.
+//
+// The superseded run said +24.4 ± 18.9 cp over 1,420 positions. Same direction,
+// but do not quote it: move-quality.mjs committed the agent's own (unplayed) pick
+// on top of the recorded move, so P died on ply 2 and BOTH arms ran on the
+// heuristic fallback — a belief β is not a knob on at all. See the header of
+// scripts/move-quality.mjs. Every pre-2026-08-07 number from that script is void.
 //
 // The likely reason is variance, not incorrectness: the weights inside a 16-world
 // draw are steep (effective sample size 3–11, dipping to 1.4 when one world holds
@@ -200,12 +287,17 @@ export function setBeliefSampleAlphaForSeat(color, a) {
 // computed from ~4 effective worlds instead of 16. The posterior's median true-
 // board rank is 9 — good, not good enough to bet a 4× smaller sample on.
 //
-// TWO THINGS BEFORE ANYONE FLIPS THIS ON. (1) That run had 21% static-eval
-// fallbacks against ~1% clean — a shared machine, so it is not quotable, and the
-// degradation plausibly penalises the weighted arm harder (a bad leaf value in a
-// heavily-weighted world costs more). Re-run it idle. (2) The interesting variant
-// is not on/off but TEMPERED: reach ∝ w^β with β≈0.5 keeps part of the correction
-// while raising the effective sample. That is the arm worth measuring next.
+// AND IT IS NOT A DILUTION ARTEFACT. The obvious defence of β=1 — that it can only
+// pay where something is actually hidden, and the average is swamped by turns
+// where it is not — was tested directly by recording |P| at every decision and
+// regressing the paired difference on it (move-quality.mjs prints the fit). No
+// relationship: slope on rank(|P|) t = −0.62, on log10|P| t = +0.97, both null,
+// and the top |P| decile is the WORST one for β=1 (+12.7 cp). Uncertainty is not
+// the hidden variable here.
+//
+// THE VARIANT STILL WORTH MEASURING is not on/off but TEMPERED: reach ∝ w^β with
+// β≈0.5 keeps part of the correction while raising the effective sample
+// (`--arm temper`). It has not been run since the harness was fixed.
 // The value is an EXPONENT β, not a flag: reach ∝ w^β. 0 = off (flat 1/N), 1 =
 // the full posterior, and β in between tempers it — which is the variant worth
 // measuring, since the objection to β=1 is variance (a correct estimator over ~4
@@ -954,6 +1046,6 @@ export function getExactBelief(state, aiColor) {
   let byColor = store.get(state.players);
   if (!byColor) { byColor = new Map(); store.set(state.players, byColor); }
   let b = byColor.get(aiColor);
-  if (!b) { b = new ExactBelief(aiColor, priorBySeat.get(aiColor) ?? null); byColor.set(aiColor, b); }
+  if (!b) { b = new ExactBelief(aiColor, priorFor(state, aiColor)); byColor.set(aiColor, b); }
   return b;
 }

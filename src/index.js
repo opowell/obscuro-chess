@@ -46,8 +46,20 @@ export {
 } from './exactBelief.js';
 
 export { Belief, getBelief, possibleSquaresFor, impossiblePlacement } from './belief.js';
-export { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from './movePrior.js';
+export {
+  makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS,
+  RATING_SLOPE, RATING_PIVOT, RATING_SCALE, ratingZ, weightsForRating,
+} from './movePrior.js';
 export { replayBelief, placementSig } from './beliefCalibration.js';
+
+// --- Corpus ---------------------------------------------------------------
+// Reading recorded games back in: a directory, a .zip, a .pgn or a session
+// .json, with the players' ratings carried through. This is what the tuning
+// scripts fit π on, and it is exported so an embedder can fit their own.
+export { loadCorpus, iterCorpus, describeCorpus, ratingSpread } from './corpus.js';
+export {
+  parsePgn, pgnToSessions, pgnGameToSession, sanToAction, normalizeMoveList,
+} from './pgn.js';
 
 // --- Engine ---------------------------------------------------------------
 export {
@@ -61,7 +73,7 @@ export {
   isAttackedBy, isKingInCheck, applyMoveToBoard, getVisibleSquares, renderBoard,
 } from './board.js';
 export { getAllLegalMoves, getAllFogMoves, pseudoLegalForUnit } from './moves.js';
-export { toFEN, uciToAction } from './fen.js';
+export { toFEN, fromFEN, uciToAction } from './fen.js';
 export { PIECE_VALUE, PST } from './pieceTables.js';
 
 // --- Settings -------------------------------------------------------------

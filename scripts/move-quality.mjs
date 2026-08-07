@@ -44,11 +44,12 @@
 //     number it printed is fiction.
 // ---------------------------------------------------------------------------
 
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadCorpus, describeCorpus } from '../src/corpus.js';
 import { FogChess } from '../src/FogChess.js';
-import { ChessObscuroAgent, makeChessLeafEval, getLeafEvalStats, resetLeafEvalStats } from '../src/ObscuroAgent.js';
+import { ChessObscuroAgent, makeChessLeafEval, getLeafEvalStats, resetLeafEvalStats, setGame } from '../src/ObscuroAgent.js';
 import {
   setBeliefSampleAlphaForSeat, setMovePriorForSeat, setBeliefReachWeightingForSeat,
 } from '../src/exactBelief.js';
@@ -155,23 +156,18 @@ function mulberry32(a) {
 // --- games -------------------------------------------------------------------
 
 if (!existsSync(SESSIONS)) {
-  console.error(`No sessions/ at ${SESSIONS} — symlink it into this worktree first.`);
+  console.error(`No corpus at ${SESSIONS} — pass --sessions <dir|zip|pgn|json>.`);
   process.exit(1);
 }
-const games = [];
-for (const f of readdirSync(SESSIONS).sort()) {
-  if (!f.endsWith('.json')) continue;
-  let sess;
-  try { sess = JSON.parse(readFileSync(join(SESSIONS, f), 'utf8')); } catch { continue; }
-  const p = sess.params;
-  if (p?.game !== 'chess') continue;
-  const c = p.config ?? {};
-  if (!(c.fogOfWar || c.fog)) continue;
-  if ((sess.log?.length ?? 0) < 20) continue;
-  games.push({ file: f, sess });
-  if (games.length >= maxGames) break;
+// 20 plies, not the loader's default 10: this harness measures move quality
+// against a deep reference search, and an opening-only game contributes almost
+// nothing but costs a full Stockfish pass per ply.
+const { games, stats: corpusStats } = loadCorpus(SESSIONS, { maxGames, minPlies: 20 });
+if (!games.length) {
+  console.error(`No chess fog games in ${SESSIONS}.\n  ${describeCorpus(games, corpusStats)}`);
+  process.exit(1);
 }
-if (!games.length) { console.error('No chess fog games in sessions/.'); process.exit(1); }
+console.log(describeCorpus(games, corpusStats));
 
 // Print how much of this run was actually evaluated by the engine. A run with
 // fallback leaves is a run where Stockfish timed out and the static evaluator
@@ -194,6 +190,27 @@ function reportLeafHealth() {
 }
 
 const actionKey = a => (a.type === 'castle' ? `O-${a.side}` : `${a.from}${a.to}${a.payload?.promote ?? ''}`);
+
+// THE AGENT MUST NOT COMMIT ITS OWN PICK HERE, and this cost every measurement
+// this script has ever produced.
+//
+// ObscuroAgent.chooseAction ends by calling game.onActionCommitted with the move
+// it chose (vendor/obscuro/src/ObscuroAgent.js), which is right in a real game:
+// the move it chose is the move that gets played. In THIS harness the pick is
+// measured and thrown away, and the RECORDED move is what happens — so the
+// belief was being advanced by our own move twice per turn, once with a move
+// that was never played. The upstream comment says what that does: "committing
+// an action other than the one actually played silently corrupts the belief
+// (fatally so for the exact tracker)". It gave up on ply 2 of every replay, and
+// every arm then ran on the heuristic particle fallback instead of P — which is
+// not the thing α and β are knobs on at all.
+//
+// So the agent gets a game whose commit hook does nothing, and replayArm commits
+// the recorded move itself, once. The `|P| exact` count in the report below is
+// the canary that caught this and the reason it is printed on every run: an arm
+// where exactness is lost early is an arm measuring the fallback belief.
+const REPLAY_GAME = { ...FogChess, onActionCommitted() {} };
+setGame(REPLAY_GAME);
 
 /**
  * Replay one recorded game from one seat, asking the agent for a move at each of
@@ -230,8 +247,16 @@ async function replayArm(sess, seat, spec, seed) {
       const tm = Date.now();
       const chosen = legal.length > 1 ? await agent.chooseAction(obs, legal) : legal[0];
       searchMs += Date.now() - tm;
-      if (VERBOSE) process.stdout.write(`      ply ${i} search ${Date.now() - tm} ms (worlds ${agent.lastAnalysis?.worlds})\n`);
-      picks.push({ ply: i, key: chosen ? actionKey(chosen) : null });
+      // |P| AT THIS DECISION — how much the seat did not know when it moved.
+      // Read AFTER chooseAction on purpose: beliefPopulation prepares the same
+      // trackers sampleWorlds does and is idempotent within a turn (turnKey), so
+      // reading it second is a pure observation and cannot perturb the search
+      // that produced `chosen`. `total` is null when exact tracking was lost
+      // (P outgrew CAP, or the time guard tripped) — recorded as null, not 0,
+      // and excluded from the fit rather than silently entered as a small |P|.
+      const pop = FogChess.beliefPopulation(obs, seat);
+      if (VERBOSE) process.stdout.write(`      ply ${i} search ${Date.now() - tm} ms (worlds ${agent.lastAnalysis?.worlds}, |P| ${pop?.total ?? 'lost'})\n`);
+      picks.push({ ply: i, key: chosen ? actionKey(chosen) : null, pSize: pop?.exact ? pop.total : null });
       FogChess.onActionCommitted(obs, seat, pa.action);
     }
     state = FogChess.applyActions(state, [pa]);
@@ -347,7 +372,7 @@ if (argv.includes('--grid')) {
 
 // --- run ---------------------------------------------------------------------
 
-const stats = { a: [], b: [], diffs: [], aTop: 0, bTop: 0, n: 0, same: 0 };
+const stats = { a: [], b: [], diffs: [], aTop: 0, bTop: 0, n: 0, same: 0, rows: [], pMismatch: 0 };
 const blankHealth = () => ({ engineLeaves: 0, fallbackLeaves: 0, pvNullNodes: 0, pvShortNodes: 0, unmappedNodes: 0, refusedNodes: 0 });
 const healthA = blankHealth(), healthB = blankHealth();
 const accStats = (into, st) => { for (const k of Object.keys(into)) into[k] += st[k] ?? 0; };
@@ -371,10 +396,11 @@ for (let g = 0; g < games.length; g++) {
     resetLeafEvalStats();
     const B = (await replayArm(sess, seat, arm.b, seed)).picks;
     accStats(healthB, getLeafEvalStats());
-    const byPlyB = new Map(B.map(p => [p.ply, p.key]));
-    for (const { ply, key: ka } of A) {
+    const byPlyB = new Map(B.map(p => [p.ply, p]));
+    for (const { ply, key: ka, pSize: pa } of A) {
       const ref = refs.get(ply);
-      const kb = byPlyB.get(ply);
+      const b = byPlyB.get(ply);
+      const kb = b?.key;
       if (!ref || !ka || !kb) continue;
       const sa = ref.byKey.get(ka), sb = ref.byKey.get(kb);
       if (sa === undefined || sb === undefined) continue;
@@ -384,6 +410,13 @@ for (let g = 0; g < games.length; g++) {
       if (lb === 0) stats.bTop++;
       if (ka === kb) stats.same++;
       stats.n++;
+      // |P| is a property of the OBSERVATION HISTORY, not of α or β — both arms
+      // see the identical position stream, so the two readings must agree. They
+      // can only diverge if one arm lost exactness where the other did not
+      // (the CAP/time-guard boundary); counted rather than averaged away, since
+      // a run with many mismatches is measuring two different belief regimes.
+      if (pa != null && b.pSize != null && pa !== b.pSize) stats.pMismatch++;
+      stats.rows.push({ game: file, seat, ply, pSize: pa, pSizeB: b.pSize, la, lb, diff: la - lb, same: ka === kb });
     }
     process.stdout.write(`  ${file.slice(0, 8)} ${seat}: ${stats.n} positions, ${((Date.now() - t0) / 1000).toFixed(0)}s\n`);
   }
@@ -424,6 +457,139 @@ if (dec > 0) {
   const z = (wins - dec / 2) / Math.sqrt(dec * 0.25);
   console.log(`SIGN TEST over the ${dec} decisive positions: A better ${(100 * wins / dec).toFixed(1)}%  (z = ${z.toFixed(2)})`);
 }
+// --- does the effect depend on how much is hidden? ---------------------------
+//
+// THE HYPOTHESIS THIS TESTS. Every arm above pools two regimes: turns where the
+// board is effectively known (|P| small, often 1) and turns where it is not
+// (|P| in the thousands). A belief change CANNOT move a decision in the first
+// regime — there is nothing to be uncertain about — so those positions enter the
+// paired mean as structural zeros and dilute whatever signal the second regime
+// carries. An aggregate null is therefore consistent with a real effect that
+// only exists where |P| is large, and the aggregate cannot tell the two apart.
+//
+// So |P| is RECORDED PER POSITION and the paired difference is REGRESSED on it,
+// rather than the positions being cut into strata: binning throws away the
+// ordering, needs edges chosen by the person hoping for a result, and estimates
+// each bin from a fraction of the data. The slope uses every position.
+//
+// Read the SLOPE, not the intercept. Negative slope = arm A gains as uncertainty
+// grows, which is the shape "the belief matters where the belief matters".
+//
+// TWO FITS, because |P| spans ~5 orders of magnitude and a raw-|P| fit is a fit
+// to its few largest values: the raw fit is the one asked for and the log10 fit
+// is the one whose leverage is spread evenly. If they disagree, believe neither
+// and look at the decile diagnostic underneath them.
+//
+// SEs ARE HETEROSKEDASTICITY-ROBUST (HC1), which is not pedantry here: the
+// hypothesis IS that the diff's variance grows with |P|, so classical OLS SEs
+// are wrong under exactly the alternative being tested.
+function ols(xs, ys) {
+  const n = xs.length;
+  if (n < 3) return null;
+  const mx = mean(xs), my = mean(ys);
+  let sxx = 0, sxy = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - mx, dy = ys[i] - my;
+    sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+  }
+  if (!(sxx > 0)) return null;
+  const slope = sxy / sxx, intercept = my - slope * mx;
+  // HC1 sandwich: Var(b) = (Σ dx²e²) / Sxx² · n/(n-2).
+  let meat = 0;
+  for (let i = 0; i < n; i++) {
+    const e = ys[i] - (intercept + slope * xs[i]);
+    meat += (xs[i] - mx) ** 2 * e * e;
+  }
+  const se = Math.sqrt((meat / (sxx * sxx)) * (n / (n - 2)));
+  return { n, slope, intercept, se, t: slope / se, r: sxy / Math.sqrt(sxx * syy) };
+}
+const fmtFit = (label, fit, unit) => {
+  if (!fit) { console.log(`  ${label.padEnd(34)} (too few points)`); return; }
+  console.log(`  ${label.padEnd(34)} ${fit.slope.toFixed(3).padStart(9)} ± ${fit.se.toFixed(3).padStart(7)} ${unit}` +
+    `   t = ${fit.t.toFixed(2).padStart(5)}   r = ${fit.r.toFixed(3)}   n = ${fit.n}`);
+};
+
+const withP = stats.rows.filter(r => r.pSize != null);
+const lostExact = stats.rows.length - withP.length;
+console.log(`\n=== paired difference vs |P| (the belief's own size at each decision) ===`);
+console.log(`positions with exact |P|: ${withP.length} of ${stats.rows.length}` +
+  (lostExact ? `  (${lostExact} excluded: exact tracking lost)` : '') +
+  (stats.pMismatch ? `  [!] ${stats.pMismatch} positions where the two arms' |P| disagreed` : ''));
+// A high loss rate is not a cosmetic gap in the fit — it means the arms spent
+// those positions on the HEURISTIC particle belief, which α and β do not even
+// apply to, so the run is partly an A/B of two identical configurations. It is
+// also right-censoring: exactness is lost at the LARGEST |P|, i.e. precisely the
+// positions this regression is about, which biases the slope toward zero.
+// Raise the cap and the guard together to buy coverage back:
+//   --set chess.EXACT_BELIEF_CAP=1500000 --set chess.EXACT_BELIEF_TIME_GUARD_MS=30000
+if (lostExact / Math.max(1, stats.rows.length) > 0.2) {
+  console.log(`  ^ ${(100 * lostExact / stats.rows.length).toFixed(0)}% OF POSITIONS RAN ON THE FALLBACK BELIEF, not P.`);
+  console.log('    α and β are knobs on the exact belief, so those positions cannot show an effect,');
+  console.log('    and they are the high-|P| ones. Re-run with a larger chess.EXACT_BELIEF_CAP.');
+}
+if (withP.length >= 3) {
+  const ps = withP.map(r => r.pSize).sort((x, y) => x - y);
+  const q = f => ps[Math.min(ps.length - 1, Math.floor(f * ps.length))];
+  console.log(`|P|: min ${ps[0]}  p25 ${q(0.25)}  median ${q(0.5)}  p75 ${q(0.75)}  p95 ${q(0.95)}  max ${ps[ps.length - 1]}` +
+    `   |P|=1 (nothing hidden): ${ps.filter(x => x === 1).length}`);
+
+  const x = withP.map(r => r.pSize), lx = withP.map(r => Math.log10(r.pSize)), y = withP.map(r => r.diff);
+  const raw = ols(x, y), lg = ols(lx, y);
+  console.log(`\ncp-loss difference (A − B; a NEGATIVE slope means A gains as uncertainty grows):`);
+  // Raw slope is cp per world, which prints as zeros — scaled to per-1000 so the
+  // number is readable without changing the fit.
+  fmtFit('slope on raw |P| (per 1000 worlds)', raw && { ...raw, slope: raw.slope * 1000, se: raw.se * 1000 }, 'cp');
+  fmtFit('slope on log10|P| (per decade)', lg, 'cp');
+
+  // The sign counterpart. The script's own header explains why the mean is the
+  // weaker statistic here (one blundered queen is 900 cp), and the same tail
+  // dominates a mean-based slope. This is the sign test made continuous in |P|:
+  // a linear probability model of "did A lose less", over decisive positions only
+  // (ties are structural zeros and would just flatten it toward 0.5).
+  const dec2 = withP.filter(r => r.diff !== 0);
+  if (dec2.length >= 3) {
+    const sx = dec2.map(r => r.pSize), slx = dec2.map(r => Math.log10(r.pSize));
+    const sy = dec2.map(r => (r.diff < 0 ? 1 : 0));
+    const sraw = ols(sx, sy), slg = ols(slx, sy);
+    console.log(`\nP(A lost less) over the ${dec2.length} decisive positions — 0.5 is no effect:`);
+    fmtFit('slope on raw |P| (per 1000 worlds)', sraw && { ...sraw, slope: sraw.slope * 1000, se: sraw.se * 1000 }, '   ');
+    fmtFit('slope on log10|P| (per decade)', slg, '   ');
+    if (slg) console.log(`  fitted P(A better) at |P|=1: ${(slg.intercept).toFixed(3)}   at |P|=10k: ${(slg.intercept + 4 * slg.slope).toFixed(3)}`);
+  }
+
+  // LINEARITY CHECK ONLY — the fits above are on raw |P|, not on these bins.
+  // Deciles are here so a curved or single-point-driven relationship is visible
+  // rather than being reported as a slope.
+  console.log(`\nlinearity check (deciles of |P|; the fits above do NOT use these):`);
+  const byP = [...withP].sort((a, b) => a.pSize - b.pSize);
+  const per = Math.ceil(byP.length / 10);
+  console.log('  |P| range'.padEnd(24) + 'n     mean Δcp   disagreed   A better');
+  for (let i = 0; i < byP.length; i += per) {
+    const b = byP.slice(i, i + per);
+    const d2 = b.filter(r => r.diff !== 0);
+    console.log(`  ${b[0].pSize}–${b[b.length - 1].pSize}`.padEnd(24) +
+      String(b.length).padStart(4) +
+      mean(b.map(r => r.diff)).toFixed(1).padStart(11) +
+      `${(100 * d2.length / b.length).toFixed(0)}%`.padStart(12) +
+      (d2.length ? `${(100 * d2.filter(r => r.diff < 0).length / d2.length).toFixed(0)}%` : '—').padStart(10));
+  }
+}
+
+// Per-position rows, so this run can be re-analysed (or pooled with another
+// arm's) without paying for the reference sweep again — which is most of the
+// wall clock.
+const dumpPath = arg('dump', null);
+if (dumpPath) {
+  const { writeFileSync } = await import('node:fs');
+  const head = 'arm,a_label,b_label,game,seat,ply,p_size,p_size_b,loss_a,loss_b,diff,same\n';
+  const body = stats.rows.map(r => [
+    armName, JSON.stringify(arm.a.label), JSON.stringify(arm.b.label), JSON.stringify(r.game), r.seat, r.ply,
+    r.pSize ?? '', r.pSizeB ?? '', r.la, r.lb, r.diff, r.same ? 1 : 0,
+  ].join(',')).join('\n');
+  writeFileSync(dumpPath, head + body + '\n');
+  console.log(`\nper-position rows → ${dumpPath}`);
+}
+
 console.log(`\nOnly the ${stats.n - stats.same} positions where the arms disagreed can carry signal.`);
 for (const [label, h] of [[arm.a.label, healthA], [arm.b.label, healthB]]) {
   const tot = h.engineLeaves + h.fallbackLeaves;

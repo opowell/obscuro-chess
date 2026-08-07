@@ -67,6 +67,7 @@
 // ---------------------------------------------------------------------------
 
 import { PIECE_VALUE, PST } from './pieceTables.js';
+import { param } from './config.js';
 
 // Material value by exactBelief piece code (1..6 = P N B R Q K).
 //
@@ -114,10 +115,11 @@ const PST_BY_SIGN = (() => {
  * model separately from the softmax that turns it into a distribution.
  *
  * `w.pstWeight` may be a NUMBER (one weight for every piece type, the original
- * model) or an ARRAY indexed by piece code 1..6 (the fitted model — the king's
- * weight comes out negative, so a single number cannot express it). Defaults are
- * all-1 / castleBonus 0, i.e. the raw feature sum, which is what the unit tests
- * pin; the shipped numbers live in FITTED_WEIGHTS.
+ * model) or an ARRAY indexed by piece code 1..6 (the fitted model — the terms
+ * span more than a factor of six, and the king's is ~0, so a single number
+ * cannot express them). Defaults are all-1 / castleBonus 0, i.e. the raw feature
+ * sum, which is what the unit tests pin; the shipped numbers live in
+ * FITTED_WEIGHTS.
  */
 export function scoreMove(pos, m, sign, w = {}) {
   const captureWeight = w.captureWeight ?? 1;
@@ -214,21 +216,34 @@ export function weightsFromVector(v, extra = {}) {
 // ---------------------------------------------------------------------------
 // FITTED_WEIGHTS — regenerate with `node scripts/fit-move-prior.mjs --write`.
 //
-// Conditional-logit MLE over every fog-legal move list in sessions/, fitted
-// 2026-07-31 on 37 games / 1520 decisions. τ = 100 is not a tuned knob: it fixes
-// the unit (weight = logits per centipawn × 100) and nothing else, because the
-// sharpness now lives per-term. Read the weights as effective temperatures —
-// rook PST τ≈11, pawn τ≈24, bishop τ≈24, knight τ≈38, queen τ≈48, capture τ≈126,
-// promotion τ≈154 — which is the 14× spread one τ could not cover.
+// Conditional-logit MLE over every fog-legal move list in the corpus. REFITTED
+// 2026-08-06 on 246 Chess.com Fog of War games / 14,836 decisions by 192
+// different players (`--sessions <crawl>.json`), replacing a 2026-07-31 fit on
+// 37 games / 1520 decisions that were one human plus this engine. τ = 100 is not
+// a tuned knob: it fixes the unit (weight = logits per centipawn × 100) and
+// nothing else, because the sharpness lives per-term. Read the weights as
+// effective temperatures — bishop PST τ≈15, rook τ≈22, pawn τ≈35, knight τ≈36,
+// queen τ≈60, capture τ≈106, promotion τ≈133.
 //
-// THE KING WEIGHT IS NEGATIVE ON PURPOSE. ChessAgent's king table is a normal
-// midgame table that pushes the king to the corner; under fog, players (human
-// and Obscuro alike) walk kings toward the centre instead, and the fit says so.
-// It is the term the old model predicted worst — at τ=200 it bought 0.08 nats on
-// king moves against 0.41–0.53 on every other piece. Note this barely moves the
-// BOARD posterior (ablating it costs nothing measurable; king moves are 9% of
-// plies and the observation filter pins kings down anyway). It is here because
-// it is right, not because it is where the win came from — that was `castle`.
+// WHY THE REFIT SHIPPED. Scored on held-out games of the new corpus, which the
+// old weights had never seen: move log-loss 2.922 → 2.896 (better in 5 folds of
+// 5), and on the gate that actually matters — BELIEF log-loss of the true
+// position — 5.229 → 5.161, with the true board's median rank in the belief's
+// own ordering improving 33 → 25. `notInP` stayed 0 in every arm.
+//
+// THE KING WEIGHT IS NOW ~0, AND THAT IS THE INTERESTING PART. The previous fit
+// had it at −0.853 and this comment used to explain, at length, that under fog
+// players walk kings toward the centre rather than to the corner a normal
+// midgame table rewards. THAT FINDING DID NOT REPLICATE. Fitting the term on 8
+// disjoint folds of the new corpus gives −0.2, +0.6, 0.0, +0.2, +0.3, −0.2,
+// +0.2, −0.4: it flips sign in 5 of 8 and averages 0.03 (τ_eff ≈ 3000, i.e. no
+// signal). Every other term is stable in sign and close in magnitude across the
+// same folds. So the negative king weight was one player's habit read as a fact
+// about fog chess — which the old comment half-anticipated by noting the term
+// bought nothing measurable on the board posterior anyway.
+//
+// Do not "fix" this back to a confident value in either direction without a
+// corpus that shows one. move-prior.test.js pins it near zero for that reason.
 //
 // FLOOR is the mixture with the uniform prior. It COSTS 0.008 nats; what it buys
 // is a bound. No legal move can ever be assigned less than floor/|M|, so no
@@ -238,12 +253,56 @@ export function weightsFromVector(v, extra = {}) {
 export const FITTED_WEIGHTS = {
   temperature: 100,
   floor: 0.03,
-  captureWeight: 0.791,
-  promoWeight: 0.651,
+  captureWeight: 0.943,
+  promoWeight: 0.753,
   //          -  pawn  knight bishop  rook  queen   king
-  pstWeight: [0, 4.252, 2.652, 4.115, 9.523, 2.064, -0.853],
-  castleBonus: 202.5,
+  pstWeight: [0, 2.887, 2.804, 6.523, 4.509, 1.662, 0.032],
+  castleBonus: 245.2,
 };
+
+// ---------------------------------------------------------------------------
+// RATING_SLOPE — π conditioned on how strong the opponent is, CONTINUOUSLY.
+//
+// FITTED_WEIGHTS is one model of "the opponent", pooled over everyone in the
+// corpus. That is the right default and it is also obviously an approximation:
+// a 1500-rated player and a 2400-rated player do not choose moves from the same
+// distribution, and π's whole job is to say which move the opponent will pick.
+//
+// Rating enters as an INTERACTION, not as a bucket. Each feature's weight is a
+// straight line in the opponent's rating:
+//
+//     weight_k(r) = FITTED_WEIGHTS_k + RATING_SLOPE_k · z(r)
+//     z(r)        = (r − RATING_PIVOT) / RATING_SCALE
+//
+// so π stays a conditional logit — `softmax(Σ_k weight_k(r) · f_k)` — and stays
+// fittable by the same concave MLE, just over twice as many parameters.
+//
+// WHY NOT BANDS. Bucketing throws away most of the data for every parameter it
+// estimates: split a corpus three ways and each band's nine weights are fitted
+// on a third of the decisions, which is how a real effect gets buried under
+// estimation variance. The slope form uses EVERY rated decision to estimate
+// every slope, has no edges to choose, and cannot produce the discontinuity
+// where a 1899-rated opponent and a 1901-rated one are served different models.
+// It also cannot have gaps, so there is no fallback rule to get wrong.
+//
+// RATING_SLOPE IS ALL ZEROS, which is exactly the null the corpus supports:
+// serving reduces to FITTED_WEIGHTS at every rating. `fit-move-prior.mjs
+// --rating` fits the slopes and only writes them if they beat the flat model on
+// HELD-OUT games — a model with twice the parameters always fits training data
+// better, so nothing here ships on in-sample improvement.
+export const RATING_PIVOT = 2000;
+export const RATING_SCALE = 400;
+export const RATING_SLOPE = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+// How far z may run from the pivot before it is clamped, so an outlier rating (or
+// a host passing a nonsense number) cannot extrapolate the fitted line past where
+// the corpus went. ±1.5 is roughly 1400–2600 Elo at the shipped pivot/scale — a
+// property of the CORPUS, which is why it moves when someone refits on their own.
+export const RATING_Z_CLAMP = 1.5;
+
+/** The centered, scaled rating the slopes multiply. 2400 → +1, 1600 → −1. */
+export function ratingZ(rating, pivot = RATING_PIVOT, scale = RATING_SCALE) {
+  return (rating - pivot) / scale;
+}
 
 // SERVE THE MODEL-FREE BASELINE instead of the fitted π — no opponent model at
 // all, every fog-legal move equally likely (UNIFORM_PRIOR below).
@@ -257,6 +316,36 @@ export const FITTED_WEIGHTS = {
 //
 // Note that uniform π is NOT a flat posterior over P — see UNIFORM_PRIOR.
 export const UNIFORM_ONLY = false;
+
+/**
+ * The weights to serve against an opponent of the given rating.
+ *
+ * Returns `base` unchanged when the rating is unknown or the slopes are all
+ * zero — the pooled model is the floor, and rating can only ever move it by an
+ * amount that was measured. `clamp` bounds z so an outlier rating (or a host
+ * passing a nonsense number) cannot extrapolate the line to somewhere the
+ * corpus never went (see RATING_Z_CLAMP).
+ *
+ * The three line parameters are resolved through settings when the caller does
+ * not name them, because they describe THE CORPUS THE SLOPES WERE FITTED ON: a
+ * host serving its own `chess.MOVE_PRIOR_RATING_SLOPE` has to be able to say
+ * which pivot, scale and clamp those slopes were fitted against, or the line is
+ * evaluated in the wrong units.
+ */
+export function weightsForRating(rating, {
+  base = FITTED_WEIGHTS, slope = RATING_SLOPE,
+  pivot = param('chess.MOVE_PRIOR_RATING_PIVOT', RATING_PIVOT),
+  scale = param('chess.MOVE_PRIOR_RATING_SCALE', RATING_SCALE),
+  clamp = param('chess.MOVE_PRIOR_RATING_Z_CLAMP', RATING_Z_CLAMP),
+} = {}) {
+  if (rating == null || !Number.isFinite(rating)) return base;
+  if (!slope?.some(x => x !== 0)) return base;
+  const z = Math.max(-clamp, Math.min(clamp, ratingZ(rating, pivot, scale)));
+  const b = weightVector(base);
+  return weightsFromVector(b.map((x, k) => x + (slope[k] ?? 0) * z), {
+    temperature: base.temperature, floor: base.floor,
+  });
+}
 
 /**
  * Build a prior. The returned function fills `out[0..moves.length-1]` with

@@ -75,7 +75,7 @@ node in the tree:
 
 | Field | Range | Formula |
 |---|---|---|
-| `leafEval.sfDepth` | 2 – 4 | `round(2 + t·2)` — **measured, not guessed**: `move-quality.mjs --grid` found depth 7 is *dominated* (it buys tactical leaves at the cost of tree size, and the tree was worth more at this search's scale, ~100× smaller than the paper's). Revisit only after the tree grows by an order of magnitude. |
+| `leafEval.sfDepth` | 2 – 4 | `round(2 + t·2)` — `move-quality.mjs --grid` found depth 7 *dominated* (it buys tactical leaves at the cost of tree size, and the tree was worth more at this search's scale, ~100× smaller than the paper's). **That run is void** — it went through the same corrupted `replayArm` as every other pre-2026-08-07 measurement (§2.4.1), so it compared depths on a belief that had collapsed to the heuristic fallback by ply 2. Re-run the grid before trusting this range. |
 | `leafEval.cols` | 5 – 14 | `round(5 + t·9)` — MultiPV lines requested per node |
 
 **`_leafEval` (TIME mode)** — full breadth always, iterative deepening bounded
@@ -138,8 +138,28 @@ or the tracker was attached mid-game).
 | `CAP` | 200,000 | max `\|P\|` before exactness is abandoned (paper: usually ≤ 10⁶ in C++; this tracker averages ~17k) |
 | `TIME_GUARD_MS` | 4000 | per-turn update budget; exceeding it also abandons exactness |
 | `REACQUIRE_BOUND` | 60,000 | max cross-product size `tryReacquire` will search when trying to rebuild a lost `P` from the heuristic belief |
-| `SAMPLE_ALPHA_DEFAULT` | 0 | exponent applied to the posterior when *sampling* search worlds (`draw ∝ w^α`). **Ships at 0 (uniform over P), deliberately ignoring the posterior** — see the long comment on `setBeliefSampleAlpha`: α=1 measured *better* sample coverage (39.3% vs 36.1% chance of including the true position) but *worse* actual play (4–11 in seat-swapped self-play). When a proxy and the target disagree, this repo follows the target. |
-| `REACH_WEIGHTING_DEFAULT` | 0 | exponent β on how much each sampled world is *worth* to the CFR (reach ∝ `w^β`), as opposed to how it is sampled. **Ships off**, on a measurement that leans against it; see the long comment on `setBeliefReachWeighting` for the tempered β≈0.5 arm that is worth measuring next. |
+| `SAMPLE_ALPHA_DEFAULT` | 0 | exponent applied to the posterior when *sampling* search worlds (`draw ∝ w^α`). **Ships at 0 (uniform over P), deliberately ignoring the posterior**, but as of 2026-08-07 that is the status-quo choice rather than a settled one — see the long comment on `setBeliefSampleAlpha`. α=1 measured *better* sample coverage (39.3% vs 36.1%) and *worse* actual play (4–11 in seat-swapped self-play), while move-quality now leans the other way (−0.86 ± 1.66 cp, sign test 52.4%, z = 1.53, over 2,044 positions). The older move-quality number that agreed with the self-play result is void — see §2.4.1. |
+| `REACH_WEIGHTING_DEFAULT` | 0 | exponent β on how much each sampled world is *worth* to the CFR (reach ∝ `w^β`), as opposed to how it is sampled. **Ships off**, on a measurement that leans against it and survived remeasurement: +2.25 ± 1.61 cp and a sign test of 47.1% (z = −1.83) over 2,044 positions, both favouring uniform reach. See the long comment on `setBeliefReachWeighting` for the tempered β≈0.5 arm, which has *not* been run since the harness was fixed. |
+
+#### 2.4.1 Every `move-quality.mjs` number before 2026-08-07 is void
+
+The harness asked the agent for a move, measured it, and then committed the
+**recorded** move — but `ObscuroAgent.chooseAction` had already committed the
+move *it* chose, so the belief was advanced by two of our own moves per turn, one
+of them never played. `vendor/obscuro/src/ObscuroAgent.js` names the consequence
+directly: "committing an action other than the one actually played silently
+corrupts the belief (fatally so for the exact tracker)."
+
+Measured effect: **P died on ply 2 of every replay**, so both arms ran on the
+heuristic particle fallback — which α and β are not knobs on — and the script was
+comparing two configurations that had no way to differ. Fixing it moved mean cp
+loss from 98.8 to 59.2 on the same positions.
+
+This invalidates every arm the script produced, including the `--grid` leaf-depth
+frontier that set `leafEval.sfDepth` in §2.2 (that row's "depth 7 is dominated"
+has not been rechecked). `move-quality.mjs` now prints the share of positions
+holding an exact |P| on every run, and shouts when it drops below 80% — that
+count is what caught this, and it is the guard against it recurring.
 
 Both α and β are the *initial* values: `setBeliefSampleAlpha` /
 `setBeliefReachWeighting` (and their per-seat variants, which is how the A/B
@@ -169,16 +189,35 @@ distribution: a softmax over a cheap, O(1)-per-move score (capture value,
 promotion value, piece-square-table delta, a castling bonus).
 
 **`FITTED_WEIGHTS`** — the production model, **fitted by conditional-logit MLE
-on 37 recorded fog games (`fit-move-prior.mjs --write`), not hand-tuned**:
+(`fit-move-prior.mjs --write`), not hand-tuned**. Refitted 2026-08-06 on 246
+Chess.com Fog of War games / 14,836 decisions by 192 players, replacing a fit on
+37 games that were one human plus this engine:
 
 | Field | Value | Note |
 |---|---|---|
-| `temperature` | 100 | fixes the unit only (logits per centipawn × 100) — sharpness now lives per-term in `pstWeight`, not in one global knob |
+| `temperature` | 100 | fixes the unit only (logits per centipawn × 100) — sharpness lives per-term in `pstWeight`, not in one global knob |
 | `floor` | 0.03 | mixes in the uniform prior: `π = (1-floor)·softmax + floor/\|M\|`; bounds how much damage one confidently-wrong parent can do |
-| `captureWeight` | 0.791 | |
-| `promoWeight` | 0.651 | |
-| `pstWeight` | `[–, 4.252(P), 2.652(N), 4.115(B), 9.523(R), 2.064(Q), –0.853(K)]` | per-piece PST-delta weight. **King weight is negative on purpose** — under fog, players walk kings toward the centre, not the corner a normal midgame table rewards. |
-| `castleBonus` | 202.5 | the single biggest term in the fitted model |
+| `captureWeight` | 0.943 | |
+| `promoWeight` | 0.753 | |
+| `pstWeight` | `[–, 2.887(P), 2.804(N), 6.523(B), 4.509(R), 1.662(Q), 0.032(K)]` | per-piece PST-delta weight. **The king weight is ~0 and must stay there** — see below. |
+| `castleBonus` | 245.2 | the single biggest term in the fitted model |
+
+The refit shipped because it won on held-out games of a corpus the old weights
+had never seen: move log-loss 2.922 → 2.896 (5 folds of 5), and on the gate that
+decides — belief log-loss of the true position — 5.229 → 5.161, with the true
+board's median rank improving 33 → 25.
+
+**The king weight used to be −0.853, documented as "negative on purpose".** That
+finding did not replicate: across 8 disjoint folds of the larger corpus the term
+comes out −0.2, +0.6, 0.0, +0.2, +0.3, −0.2, +0.2, −0.4 — sign-flipping in 5 of
+8, mean 0.03, τ_eff ≈ 3000. Every other term keeps its sign and rough magnitude
+across the same folds. The old value was one player's habit, and the model now
+says nothing about where kings go. `move-prior.test.js` pins it near zero.
+
+Do not hand-tune these — read the file's header (esp. the "SCAR TISSUE"
+section) before changing any of them. `belief.js`'s `THREAT_BIAS`/`MAX_LURKERS`
+document two earlier times an over-sharp belief made the AI measurably worse;
+this model's `floor` exists for the same reason.
 
 **`MOVE_PRIOR_UNIFORM`** — `false`. Serve the model-free baseline instead of the
 fitted model: every fog-legal move equally likely (`UNIFORM_PRIOR`). This is the
@@ -186,14 +225,45 @@ paper's own setting — it samples uniformly from `P` and models nothing about h
 the opponent chooses — and it is the arm every measurement of this model is
 against, which is why it is a switch rather than something a caller has to
 reconstruct out of weights (`floor` cannot reach 1, and `temperature: Infinity`
-is not expressible in JSON). Note that at the shipped α = β = 0 the posterior
-reaches play through nothing at all, so on its own this changes the belief the
-analysis panel and `calibrate-belief.mjs` report, not the move.
+is not expressible in JSON). Checked on **both** compile paths, so turning it on
+cannot leave a rating-tilted prior serving one seat. Note that at the shipped
+α = β = 0 the posterior reaches play through nothing at all, so on its own this
+changes the belief the analysis panel and `calibrate-belief.mjs` report, not the
+move.
 
-Do not hand-tune these — read the file's header (esp. the "SCAR TISSUE"
-section) before changing any of them. `belief.js`'s `THREAT_BIAS`/`MAX_LURKERS`
-document two earlier times an over-sharp belief made the AI measurably worse;
-this model's `floor` exists for the same reason.
+**`RATING_SLOPE`** — `[0,0,0,0,0,0,0,0,0]`, and zeros are the shipped state.
+The opponent's rating tilts every weight continuously rather than selecting a
+bucket:
+
+```
+weight_k(r) = FITTED_WEIGHTS_k + RATING_SLOPE_k · z(r),   z = (r − RATING_PIVOT) / RATING_SCALE
+```
+
+with `RATING_PIVOT` 2000, `RATING_SCALE` 400 and `RATING_Z_CLAMP` 1.5, so an
+outlier rating cannot extrapolate the line past where the corpus went (±1.5 is
+roughly 1400–2600 Elo at the shipped pivot and scale). Fit it with
+`fit-move-prior.mjs --rating --write`, which only writes slopes that beat the
+flat model on held-out games by `--min-rating-gain` (0.01 nats).
+
+All four are settable — `MOVE_PRIOR_RATING_SLOPE`, `MOVE_PRIOR_RATING_PIVOT`,
+`MOVE_PRIOR_RATING_SCALE`, `MOVE_PRIOR_RATING_Z_CLAMP` — because the pivot, scale
+and clamp describe **the corpus the slopes were fitted on**: a host serving its
+own slopes under this package's pivot evaluates the line in the wrong units.
+
+Continuous, not bucketed, because bucketing estimates each band's nine weights
+from a fraction of the data — three bands means each weight sees a third of the
+decisions — while the interaction form uses every rated decision for every slope,
+has no edges to choose, and cannot serve two adjacent ratings different models.
+
+Measured 2026-08-06 on 14,614 rated decisions: the sloped model scores **2.896**
+against the flat model's **2.897** held out — Δ +0.0003 nats. The individual
+slopes are not small (rook PST moves −2.7 per 400 Elo, 64% of its base), which is
+what fitting noise looks like when you have 9 extra parameters. Serving with
+zeros reduces exactly to `FITTED_WEIGHTS` at every rating.
+
+At serve time the **opponent's** rating is what tilts the model
+(`state.gameSpecific.opponentRating`, or `rating` on the opposing player);
+compiled priors are cached per 25 Elo, which is a cache granularity, not a bin.
 
 ### 2.6 Stockfish backend (`src/stockfish.js`)
 
@@ -267,9 +337,9 @@ fitted against it:
   one settable would let a host serve the fitted weights against a different
   feature definition from the one they were fitted on — a train/serve skew with
   no error message.
-- Encoding and memoisation internals (`exactBelief.js`'s Zobrist tables,
-  `stockfish.js`'s engine tag) are bookkeeping: they change how a value is
-  stored or keyed, not what it is.
+- Encoding and memoisation internals (`exactBelief.js`'s Zobrist tables and its
+  25-Elo prior cache step, `stockfish.js`'s engine tag) are bookkeeping: they
+  change how a value is stored or keyed, not what it is.
 
 Everything else that changes what the AI plays, or how much work it does per
 move, is settable — including the two knobs a preset needs to state the paper's

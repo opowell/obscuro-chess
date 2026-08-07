@@ -6,6 +6,8 @@
 //   node scripts/fit-move-prior.mjs --e2e --ablate  # + per-term ablations
 //   node scripts/fit-move-prior.mjs --write         # update FITTED_WEIGHTS
 //   node scripts/fit-move-prior.mjs --actor human   # fit one opponent type
+//   node scripts/fit-move-prior.mjs --sessions corpus.zip        # zip / dir / PGN
+//   node scripts/fit-move-prior.mjs --rating --write             # rating-tilted π
 //
 // WHY THIS EXISTS. The first version of the prior gave every term weight 1 and
 // divided by one temperature, and τ was chosen by sweeping it against the
@@ -38,17 +40,39 @@
 //    ship a number you can't reproduce. Everything here is cross-validated by
 //    GAME (never by ply — plies inside one game are anything but independent),
 //    and --write refits on everything only AFTER the CV number has been printed.
+//
+// OPPONENT RATING (--rating). A 1500-rated opponent and a 2400-rated one are not
+// the same distribution, and π is supposed to be a model of the opponent. When
+// the corpus carries ratings (PGN `WhiteElo`/`BlackElo`, a `rating` on a
+// session's player, or a crawl's per-player Elo), rating enters CONTINUOUSLY, as
+// an interaction rather than a bucket:
+//
+//     weight_k(r) = a_k + b_k · z(r),    z(r) = (r − PIVOT) / SCALE
+//
+// which is still a conditional logit — each interaction is just another column,
+// f_k · z — so the same concave MLE fits all 18 parameters at once. Every rated
+// decision informs every slope, which is the whole reason not to bucket: three
+// bands would estimate each of nine weights from a third of the data, and a real
+// effect drowns in that. It also has no edges to pick and no discontinuity where
+// two adjacent ratings get different models.
+//
+// Doubling the parameters fits the training data better by construction, and
+// that fact is worth nothing. `--rating` therefore reports the only number that
+// can justify it: on HELD-OUT games, the sloped model against the flat one, over
+// the same rated decisions. Slopes that do not earn it are not written.
 // ---------------------------------------------------------------------------
 
-import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { genFogMoves, fromBoardObject } from '../src/exactBelief.js';
 import { FogChess } from '../src/FogChess.js';
 import { replayBelief, mean } from '../src/beliefCalibration.js';
+import { loadCorpus, describeCorpus, ratingSpread } from '../src/corpus.js';
 import {
   moveFeatures, NUM_FEATURES, FEATURE_NAMES, makeMovePrior, weightsFromVector,
-  UNIFORM_PRIOR, FITTED_WEIGHTS,
+  weightVector, UNIFORM_PRIOR, FITTED_WEIGHTS,
+  RATING_PIVOT, RATING_SCALE, RATING_SLOPE, ratingZ,
 } from '../src/movePrior.js';
 import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
 
@@ -56,8 +80,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // The recorded games to replay. Defaults to the three fixtures the test suite
 // uses, so the script runs from a bare clone; that is enough to smoke-test the
 // pipeline and nowhere near enough to draw a conclusion from. Point --sessions
-// at a real corpus for that (battle-simulator keeps its recorded games in its
-// own untracked sessions/ directory).
+// at a real corpus for that — a directory, a .zip, a .pgn or a .json, in any
+// nesting (see src/corpus.js). battle-simulator keeps its recorded games in its
+// own untracked sessions/ directory.
 const { rest: argv, printConfig } = applyCliSettings();
 await maybePrintConfig(printConfig);
 const arg = makeArgReader(argv);
@@ -68,6 +93,12 @@ const L2 = Number(arg('l2', '1e-3'));
 const ITERS = Number(arg('iters', '1500'));
 const ACTOR = arg('actor', null);
 const MAX_GAMES = Number(arg('max-games', '999'));
+const RATING = has('rating');
+// A floor on the gain. Slopes that beat the flat model by 0.0004 nats have found
+// nothing; shipping them costs nine numbers and a rating lookup at serve time to
+// buy noise. 0.01 is the same order as what `floor` costs (0.008), i.e. the
+// smallest difference this subsystem has ever treated as real.
+const MIN_RATING_GAIN = Number(arg('min-rating-gain', '0.01'));
 
 // Serving divides the weighted feature sum by a temperature, so the weight
 // vector is only defined up to that scale; TEMPERATURE fixes the unit and
@@ -89,25 +120,17 @@ const sqToIdx = sq => (sq.charCodeAt(1) - 49) * 8 + (sq.charCodeAt(0) - 97);
 // --- data --------------------------------------------------------------------
 
 if (!existsSync(SESSIONS)) {
-  console.error(`No sessions at ${SESSIONS}.\n` +
-    'Pass --sessions <dir> pointing at a directory of recorded session JSONs.');
+  console.error(`No corpus at ${SESSIONS}.\n` +
+    'Pass --sessions <path> pointing at a directory, .zip, .pgn or .json of recorded fog games.');
   process.exit(1);
 }
 
-const games = [];
-for (const f of readdirSync(SESSIONS).sort()) {
-  if (!f.endsWith('.json')) continue;
-  let sess;
-  try { sess = JSON.parse(readFileSync(join(SESSIONS, f), 'utf8')); } catch { continue; }
-  const p = sess.params;
-  if (p?.game !== 'chess') continue;
-  const c = p.config ?? {};
-  if (!(c.fogOfWar || c.fog)) continue;
-  if ((sess.log?.length ?? 0) < 10) continue;
-  games.push({ file: f, sess });
-  if (games.length >= MAX_GAMES) break;
+const { games, stats } = loadCorpus(SESSIONS, { maxGames: MAX_GAMES });
+if (!games.length) {
+  console.error(`No chess fog games in ${SESSIONS}.\n  ${describeCorpus(games, stats)}`);
+  process.exit(1);
 }
-if (!games.length) { console.error('No chess fog games in sessions/.'); process.exit(1); }
+console.log(describeCorpus(games, stats));
 
 /** Locate a recorded action inside genFogMoves' output. */
 function indexOfAction(moves, action) {
@@ -122,10 +145,8 @@ function indexOfAction(moves, action) {
 }
 
 let unmatched = 0;
-const examples = [];   // { F: Float64Array[], chosen, actor, game, movedType }
-games.forEach(({ sess }, gi) => {
-  const typeOf = {};
-  for (const pl of sess.params.players ?? []) typeOf[pl.id ?? pl.playerId] = pl.type ?? pl.agent ?? '?';
+const examples = [];   // { F: Float64Array[], chosen, actor, game, movedType, band }
+games.forEach(({ sess, actors, ratings }, gi) => {
   let state = FogChess.createInitialState(sess.params.players, sess.params.config);
   for (const entry of sess.log ?? []) {
     const pa = entry.playerActions?.[0];
@@ -140,8 +161,11 @@ games.forEach(({ sess }, gi) => {
     if (chosen >= 0 && moves.length > 1) {
       const F = moves.map(m => moveFeatures(pos, m, sign, new Float64Array(NUM_FEATURES)));
       examples.push({
-        F, chosen, game: gi, actor: typeOf[pa.playerId] ?? '?',
+        F, chosen, game: gi, actor: actors[pa.playerId] ?? '?',
         movedType: Math.abs(pos[sqToIdx(pa.action.from)]),
+        // The rating of the SEAT THAT MOVED. π models whoever is choosing, and
+        // in a 1500-vs-2400 game the two seats are two different opponents.
+        rating: ratings[pa.playerId] ?? null,
       });
     }
     state = FogChess.applyActions(state, [pa]);
@@ -256,6 +280,91 @@ function fit(idxs, { iters = ITERS, lr = 0.05, l2 = L2 } = {}) {
   return V;
 }
 
+// --- the same conditional logit, widened by the rating interaction -----------
+//
+// Column 2k is f_k and column 2k+1 is f_k · z(r), so the 18-vector W means
+// weight_k(r) = W[2k] + W[2k+1]·z. Everything else — concavity, the
+// f(played) − E_π[f] gradient, Adam — is unchanged; this is one design matrix,
+// not a second model. The features are already standardized, and z is O(1) by
+// construction, so the interaction columns arrive at the optimizer at a sane
+// scale without a second standardization pass.
+const WIDE = 2 * NUM_FEATURES;
+const zOf = ex => Math.max(-1.5, Math.min(1.5, ratingZ(ex.rating, RATING_PIVOT, RATING_SCALE)));
+
+/** Row j of example `ex`, widened in place into `out` (length WIDE). */
+function wideRow(ex, j, out) {
+  const z = zOf(ex), F = ex.F[j];
+  for (let k = 0; k < NUM_FEATURES; k++) { out[2 * k] = F[k]; out[2 * k + 1] = F[k] * z; }
+  return out;
+}
+
+function logLikWide(W, idxs) {
+  const row = new Float64Array(WIDE);
+  let ll = 0;
+  for (const i of idxs) {
+    const ex = examples[i], n = ex.F.length;
+    const s = new Float64Array(n);
+    let max = -Infinity;
+    for (let j = 0; j < n; j++) {
+      wideRow(ex, j, row);
+      let v = 0;
+      for (let k = 0; k < WIDE; k++) v += W[k] * row[k];
+      s[j] = v;
+      if (v > max) max = v;
+    }
+    let sum = 0;
+    for (let j = 0; j < n; j++) sum += Math.exp(s[j] - max);
+    ll += (s[ex.chosen] - max) - Math.log(sum);
+  }
+  return ll / idxs.length;
+}
+
+function fitWide(idxs, { iters = ITERS, lr = 0.05, l2 = L2 } = {}) {
+  const W = new Float64Array(WIDE), g = new Float64Array(WIDE);
+  const m = new Float64Array(WIDE), v = new Float64Array(WIDE);
+  const row = new Float64Array(WIDE);
+  const b1 = 0.9, b2 = 0.999, eps = 1e-8;
+  for (let it = 1; it <= iters; it++) {
+    g.fill(0);
+    for (const i of idxs) {
+      const ex = examples[i], n = ex.F.length;
+      const s = new Float64Array(n);
+      let max = -Infinity;
+      for (let j = 0; j < n; j++) {
+        wideRow(ex, j, row);
+        let x = 0;
+        for (let k = 0; k < WIDE; k++) x += W[k] * row[k];
+        s[j] = x;
+        if (x > max) max = x;
+      }
+      let sum = 0;
+      const e = new Float64Array(n);
+      for (let j = 0; j < n; j++) { e[j] = Math.exp(s[j] - max); sum += e[j]; }
+      for (let j = 0; j < n; j++) {
+        wideRow(ex, j, row);
+        const p = e[j] / sum;
+        for (let k = 0; k < WIDE; k++) g[k] -= p * row[k];
+      }
+      wideRow(ex, ex.chosen, row);
+      for (let k = 0; k < WIDE; k++) g[k] += row[k];
+    }
+    for (let k = 0; k < WIDE; k++) {
+      const grad = g[k] / idxs.length - l2 * W[k];
+      m[k] = b1 * m[k] + (1 - b1) * grad;
+      v[k] = b2 * v[k] + (1 - b2) * grad * grad;
+      W[k] += lr * (m[k] / (1 - Math.pow(b1, it))) / (Math.sqrt(v[k] / (1 - Math.pow(b2, it))) + eps);
+    }
+  }
+  // STANDARDIZED units, like `fit` — `logLikWide` scores against the same
+  // standardized features, so converting here would silently compare a serving-
+  // unit weight vector to standardized data. `wideToServing` does the conversion
+  // once, at the point of reporting and writing.
+  return W;
+}
+
+/** Standardized 18-vector → serving units. Both halves share feature k's scale. */
+const wideToServing = W => Array.from(W, (x, k) => TEMPERATURE * x * SCALE[k >> 1]);
+
 const all = examples.map((_, i) => i);
 const trainSet = ACTOR ? all.filter(i => examples[i].actor === ACTOR) : all;
 if (ACTOR) console.log(`--actor ${ACTOR}: ${trainSet.length} of ${all.length} decisions`);
@@ -267,23 +376,98 @@ const foldOf = gi => gi % FOLDS;
 const inFold = (i, f) => examples[i].game % FOLDS === f;
 
 console.log(`\n=== ${FOLDS}-fold CV by game, per-move log-loss (nats; lower better) ===`);
-let cvFit = 0, cvUnif = 0, cvOld = 0, cvN = 0;
+let cvFit = 0, cvUnif = 0, cvOld = 0, cvShip = 0, cvN = 0;
 // The model as it shipped before fitting: every term weight 1, no castle bonus,
 // τ = 200 — i.e. weight 100/200 per term in TEMPERATURE=100 units.
 const oldV = stdFrom([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0]);
+// The weights CURRENTLY SHIPPED, on the same held-out folds. `fitted` is refit
+// per fold and has therefore seen this corpus; this arm is a fixed model that
+// has not seen any of it. When you point the script at a corpus from a
+// different population than the shipped numbers came off, the gap between these
+// two arms IS the case for refitting — and if there is no gap, there is no case.
+const shippedV = stdFrom(weightVector(FITTED_WEIGHTS)
+  .map(x => x * (TEMPERATURE / FITTED_WEIGHTS.temperature)));
 for (let f = 0; f < FOLDS; f++) {
   const tr = trainSet.filter(i => !inFold(i, f));
   const te = all.filter(i => inFold(i, f));
   if (!tr.length || !te.length) continue;
   const V = fit(tr);
-  const fitLL = -logLik(V, te), unifLL = uniformLogLoss(te), oldLL = -logLik(oldV, te);
-  cvFit += fitLL * te.length; cvUnif += unifLL * te.length; cvOld += oldLL * te.length; cvN += te.length;
-  console.log(`  fold ${f}: n=${String(te.length).padStart(4)}  uniform ${unifLL.toFixed(3)}  ` +
-    `τ=200 ${oldLL.toFixed(3)}  fitted ${fitLL.toFixed(3)}`);
+  const fitLL = -logLik(V, te), unifLL = uniformLogLoss(te);
+  const oldLL = -logLik(oldV, te), shipLL = -logLik(shippedV, te);
+  cvFit += fitLL * te.length; cvUnif += unifLL * te.length;
+  cvOld += oldLL * te.length; cvShip += shipLL * te.length; cvN += te.length;
+  console.log(`  fold ${f}: n=${String(te.length).padStart(5)}  uniform ${unifLL.toFixed(3)}  ` +
+    `τ=200 ${oldLL.toFixed(3)}  shipped ${shipLL.toFixed(3)}  fitted ${fitLL.toFixed(3)}`);
 }
 console.log(`  POOLED : uniform ${(cvUnif / cvN).toFixed(3)}  ` +
   `τ=200 ${(cvOld / cvN).toFixed(3)} (Δ ${((cvUnif - cvOld) / cvN).toFixed(3)})  ` +
+  `shipped ${(cvShip / cvN).toFixed(3)} (Δ ${((cvUnif - cvShip) / cvN).toFixed(3)})  ` +
   `fitted ${(cvFit / cvN).toFixed(3)} (Δ ${((cvUnif - cvFit) / cvN).toFixed(3)})`);
+console.log(`  refitting on this corpus buys ${((cvShip - cvFit) / cvN).toFixed(3)} nats over the shipped model.`);
+
+// --- opponent rating, as a continuous interaction ----------------------------
+//
+// The model doubles to 18 parameters: for each feature f_k, a base weight a_k
+// and a slope b_k multiplying f_k · z(r). Fitting is unchanged — an interaction
+// is just another column, and the objective stays concave — so `fitWide` is the
+// same optimizer over a wider design matrix.
+//
+// Everything here runs on RATED decisions only, and the flat model it is
+// compared against is refitted on those same rated decisions. Giving unrated
+// decisions z = 0 would silently assert they are average, and comparing against
+// a flat model fitted on a different set would confound the slope with the
+// change of population.
+let ratingFit = null;   // { n, flatLL, slopedLL, delta, slope, spread }
+if (RATING) {
+  const rated = all.filter(i => examples[i].rating != null);
+  console.log(`\n=== opponent rating as a continuous term — held-out, sloped vs flat ===`);
+  const spread = ratingSpread(games);
+  if (!rated.length) {
+    console.log('  no rated decisions in this corpus; slopes cannot be fitted.');
+    console.log('  (battle-simulator session JSON carries no ratings — use PGN or a crawl.)');
+  } else if (rated.length < 500) {
+    console.log(`  only ${rated.length} rated decisions — too few to fit 18 parameters; skipping.`);
+  } else {
+    console.log(`  ${rated.length} of ${all.length} decisions carry a rating; ` +
+      `ratings ${spread.min}–${spread.max} (p10 ${spread.p10}, median ${spread.median}, p90 ${spread.p90})`);
+    console.log(`  z = (rating − ${RATING_PIVOT}) / ${RATING_SCALE}`);
+
+    let accFlat = 0, accSloped = 0, accUnif = 0, accN = 0;
+    const inTrainSet = new Set(trainSet);
+    for (let f = 0; f < FOLDS; f++) {
+      const tr = rated.filter(i => !inFold(i, f) && inTrainSet.has(i));
+      const te = rated.filter(i => inFold(i, f));
+      if (!tr.length || !te.length) continue;
+      const flatV = fit(tr);
+      const wideV = fitWide(tr);
+      accFlat += -logLik(flatV, te) * te.length;
+      accSloped += -logLikWide(wideV, te) * te.length;
+      accUnif += uniformLogLoss(te) * te.length;
+      accN += te.length;
+    }
+    const flatLL = accFlat / accN, slopedLL = accSloped / accN;
+    const delta = flatLL - slopedLL;
+    console.log(`  n=${accN}  uniform ${(accUnif / accN).toFixed(3)}  ` +
+      `flat ${flatLL.toFixed(3)}  sloped ${slopedLL.toFixed(3)}  ` +
+      `Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(4)}  ` +
+      (delta > MIN_RATING_GAIN ? 'ships'
+        : delta > 0 ? `no better than flat (Δ < ${MIN_RATING_GAIN})` : 'LOSES to flat'));
+
+    // The slopes themselves, fitted on everything, reported per term in the
+    // units a reader can act on: how much the weight moves per 400 Elo.
+    const wide = wideToServing(fitWide(rated));
+    const slope = [];
+    for (let k = 0; k < NUM_FEATURES; k++) slope.push(wide[2 * k + 1]);
+    console.log(`\n  per-term slope (change in weight per ${RATING_SCALE} Elo), base at ${RATING_PIVOT}:`);
+    for (let k = 0; k < NUM_FEATURES; k++) {
+      const a = wide[2 * k], b = wide[2 * k + 1];
+      const rel = a !== 0 ? ` (${(100 * b / Math.abs(a)).toFixed(0)}% of base)` : '';
+      console.log(`    ${FEATURE_NAMES[k].padEnd(11)} base ${a.toFixed(3).padStart(9)}   ` +
+        `slope ${b.toFixed(3).padStart(9)}${rel}`);
+    }
+    ratingFit = { n: accN, flatLL, slopedLL, delta, slope, spread };
+  }
+}
 
 // --- the real gate: position log-loss on held-out games ----------------------
 
@@ -298,6 +482,11 @@ if (has('e2e')) {
     // needs to be compared against that lesson in the same measurement, not
     // against a number remembered from a different session's harness.
     ['τ=60 (old cliff)', () => makeMovePrior({ temperature: 60 })],
+    // The weights currently in movePrior.js, which have not seen this corpus.
+    // `fitted` below is refit on each training fold, so this pair is the whole
+    // decision: ship the refit only if it beats what is already there ON THE
+    // BELIEF, which is the gate move-level log-loss is not.
+    ['shipped', () => makeMovePrior(FITTED_WEIGHTS)],
     ['fitted', V => makeMovePrior(weightsFromVector(weightsFrom(V), { temperature: TEMPERATURE }))],
     ['fitted+floor', V => makeMovePrior(weightsFromVector(weightsFrom(V), { temperature: TEMPERATURE, floor: FITTED_WEIGHTS.floor }))],
     // MLE lands on the right sharpness by construction, so this should LOSE —
@@ -364,28 +553,61 @@ V.forEach((x, k) => {
       : `   τ_eff ≈ ${Math.abs(tau).toFixed(0)}${x < 0 ? '  (SIGN FLIPPED vs the hand model)' : ''}`));
 });
 
-const literal =
-  `export const FITTED_WEIGHTS = {\n` +
-  `  temperature: ${TEMPERATURE},\n` +
-  `  floor: ${FITTED_WEIGHTS.floor},\n` +
-  `  captureWeight: ${V[0].toFixed(3)},\n` +
-  `  promoWeight: ${V[1].toFixed(3)},\n` +
-  `  //          -  pawn  knight bishop  rook  queen   king\n` +
-  `  pstWeight: [0, ${V[2].toFixed(3)}, ${V[3].toFixed(3)}, ${V[4].toFixed(3)}, ` +
-  `${V[5].toFixed(3)}, ${V[6].toFixed(3)}, ${V[7].toFixed(3)}],\n` +
-  `  castleBonus: ${V[8].toFixed(1)},\n` +
-  `};`;
+/** A fitted weight vector → the object literal movePrior.js holds. */
+function weightsLiteral(v, indent = '') {
+  return `{\n` +
+    `${indent}  temperature: ${TEMPERATURE},\n` +
+    `${indent}  floor: ${FITTED_WEIGHTS.floor},\n` +
+    `${indent}  captureWeight: ${v[0].toFixed(3)},\n` +
+    `${indent}  promoWeight: ${v[1].toFixed(3)},\n` +
+    `${indent}  //          -  pawn  knight bishop  rook  queen   king\n` +
+    `${indent}  pstWeight: [0, ${v[2].toFixed(3)}, ${v[3].toFixed(3)}, ${v[4].toFixed(3)}, ` +
+    `${v[5].toFixed(3)}, ${v[6].toFixed(3)}, ${v[7].toFixed(3)}],\n` +
+    `${indent}  castleBonus: ${v[8].toFixed(1)},\n` +
+    `${indent}}`;
+}
+
+const literal = `export const FITTED_WEIGHTS = ${weightsLiteral(V)};`;
+
+// RATING_SLOPE ships only if the sloped model EARNED it on held-out games. If it
+// did not, the zeros stay and serving reduces to FITTED_WEIGHTS at every rating,
+// which is the honest outcome: "we have no evidence rating moves these weights".
+let ratingLiteral = null;
+if (ratingFit && ratingFit.delta > MIN_RATING_GAIN) {
+  const s = ratingFit.slope;
+  ratingLiteral =
+    `export const RATING_SLOPE = [\n` +
+    `  // ${ratingFit.n} held-out decisions, ${ratingFit.delta.toFixed(4)} nats better than flat.\n` +
+    `  // Ratings ${ratingFit.spread.min}–${ratingFit.spread.max}; the fit is only evidence over that range.\n` +
+    `  //  capture  promo   pawn  knight bishop  rook  queen   king  castle\n` +
+    `  ${s.map(x => x.toFixed(3)).join(', ')},\n` +
+    `];`;
+}
 
 if (has('write')) {
-  const file = join(HERE, 'movePrior.js');
+  // NOTE the path: movePrior.js lives in src/, not next to this script. It was
+  // join(HERE, 'movePrior.js') until 2026-08-05, which meant --write threw
+  // ENOENT for anyone who followed the documented regeneration instructions.
+  const file = join(HERE, '..', 'src', 'movePrior.js');
   const src = readFileSync(file, 'utf8');
   const re = /export const FITTED_WEIGHTS = \{[\s\S]*?\n\};/;
   if (!re.test(src)) {
-    console.error('\nCould not find the FITTED_WEIGHTS literal in movePrior.js — not writing.');
+    console.error(`\nCould not find the FITTED_WEIGHTS literal in ${file} — not writing.`);
     process.exit(1);
   }
-  writeFileSync(file, src.replace(re, literal));
-  console.log(`\nWrote FITTED_WEIGHTS to ${file}. Re-run the chess tests.`);
+  let out = src.replace(re, literal);
+  if (ratingLiteral) {
+    const rre = /export const RATING_SLOPE = \[[\s\S]*?\n\];/;
+    if (!rre.test(out)) {
+      console.error('\nCould not find the RATING_SLOPE literal — not writing.');
+      process.exit(1);
+    }
+    out = out.replace(rre, ratingLiteral);
+  }
+  writeFileSync(file, out);
+  console.log(`\nWrote FITTED_WEIGHTS${ratingLiteral ? ' and RATING_SLOPE' : ''} to ${file}. Re-run the chess tests.`);
 } else {
-  console.log(`\n--write would replace movePrior.js's FITTED_WEIGHTS with:\n\n${literal}`);
+  console.log(`\n--write would replace src/movePrior.js's FITTED_WEIGHTS with:\n\n${literal}`);
+  if (ratingLiteral) console.log(`\n…and RATING_SLOPE with:\n\n${ratingLiteral}`);
+  else if (RATING) console.log('\n--write would leave RATING_SLOPE at zero (the slopes did not earn it).');
 }

@@ -221,21 +221,39 @@ test('movePrior: the floor bounds how wrong one ply can be', () => {
   assert.throws(() => makeMovePrior({ temperature: 100, floor: 1 }), /floor/);
 });
 
-test('movePrior: the shipped model expects kings to WANDER, not to hide', () => {
-  // The one qualitative claim the fit makes that the hand-written model got
-  // backwards. ChessAgent's king table is a normal midgame table (corner good,
-  // centre bad); under fog, players walk kings out, and FITTED_WEIGHTS carries a
-  // negative king weight to say so. If someone "fixes" that sign, this fails.
-  assert.ok(FITTED_WEIGHTS.pstWeight[6] < 0, 'king PST weight is negative');
+test('movePrior: the shipped model has NO opinion about where kings go', () => {
+  // This test used to assert the opposite sign, and the story behind the change
+  // is worth keeping. The 2026-07-31 fit (37 games, one human plus this engine)
+  // put the king PST weight at −0.853, and that was read as a fact about fog
+  // chess: players walk kings toward the centre, not to the corner ChessAgent's
+  // normal midgame table rewards.
+  //
+  // Refitting on 246 Chess.com games by 192 players did not reproduce it. Across
+  // 8 disjoint folds the term came out −0.2, +0.6, 0.0, +0.2, +0.3, −0.2, +0.2,
+  // −0.4 — sign-flipping in 5 of 8, mean 0.03 — while every other term held its
+  // sign and rough magnitude. One player's habit, not a property of the game.
+  //
+  // So what is pinned now is the ABSENCE of a claim: the term must stay near
+  // zero. A confident value in EITHER direction needs a corpus that shows one.
+  assert.ok(Math.abs(FITTED_WEIGHTS.pstWeight[6]) < 0.5,
+    `king PST weight should be ~0, got ${FITTED_WEIGHTS.pstWeight[6]}`);
+
+  // Concretely: king moves are priced almost entirely by the other terms, so
+  // centralising and retreating score within a rounding error of each other.
   const pos = fromBoardObject({
     e4: unit('wK', 'white', 'king', 'e4'),
     a8: unit('bK', 'black', 'king', 'a8'),
   }, null, null);
   const toCentre = scoreMove(pos, mv('e4', 'd5'), 1, FITTED_WEIGHTS);
   const toEdge = scoreMove(pos, mv('e4', 'e3'), 1, FITTED_WEIGHTS);
-  assert.ok(toCentre > toEdge, `centralising the king scores higher: ${toCentre} vs ${toEdge}`);
-  // The hand model, by construction, said the opposite.
-  assert.ok(scoreMove(pos, mv('e4', 'd5'), 1) < scoreMove(pos, mv('e4', 'e3'), 1));
+  assert.ok(Math.abs(toCentre - toEdge) < 10,
+    `neither king move is strongly preferred: ${toCentre} vs ${toEdge}`);
+  // The hand model, by construction, had a strong opinion — that is the contrast.
+  const handCentre = scoreMove(pos, mv('e4', 'd5'), 1);
+  const handEdge = scoreMove(pos, mv('e4', 'e3'), 1);
+  assert.ok(handCentre < handEdge, 'the unfitted model still prefers the corner');
+  assert.ok(Math.abs(handCentre - handEdge) > Math.abs(toCentre - toEdge),
+    'and it holds that opinion more strongly than the fitted model holds any');
 });
 
 test('movePrior: production actually serves the fitted model', () => {

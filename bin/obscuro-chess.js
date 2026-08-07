@@ -19,6 +19,7 @@ const COMMANDS = {
   demo: '../examples/demo.js',
   calibrate: '../scripts/calibrate-belief.mjs',
   'fit-prior': '../scripts/fit-move-prior.mjs',
+  'adopt-corpus': '../scripts/adopt-corpus.mjs',
   'move-quality': '../scripts/move-quality.mjs',
   strength: '../scripts/strength-belief.mjs',
 };
@@ -32,6 +33,7 @@ Commands:
   strength        seat-swapped self-play win rates
   calibrate       belief calibration over recorded sessions
   fit-prior       refit the move prior by MLE
+  adopt-corpus    measure a new corpus end to end, and ship it if it wins
   config          print the resolved configuration and exit
 
 ${SETTINGS_USAGE}

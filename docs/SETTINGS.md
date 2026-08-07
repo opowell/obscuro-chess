@@ -50,6 +50,7 @@ chess.LEAF_CLAMP                       search.DIAL.power.worlds
 chess.CHESS_DIAL.leafEval.sfDepth      search.DIAL.time.maxInfosets
 chess.EXACT_BELIEF_CAP                 search.DIAL_CONVEX_EXPONENT
 chess.MOVE_PRIOR_FITTED_WEIGHTS        search.SEARCH_DEFAULTS.safePmaxThreshold
+chess.MOVE_PRIOR_RATING_SLOPE
 ```
 
 `obscuro-chess config` prints the full list with current values. A key that
@@ -64,6 +65,22 @@ Nested defaults are **deep-merged**, so naming one field leaves its siblings
 alone — you can set `chess.CHESS_DIAL.leafEval.cols` without restating
 `sfDepth`, or one weight of `chess.MOVE_PRIOR_FITTED_WEIGHTS` without restating
 the fitted model.
+
+`chess.MOVE_PRIOR_RATING_SLOPE` is how a host serves rating-conditioned weights
+it fitted on its own corpus without editing the package — the same nine numbers
+`fit-move-prior.mjs --rating --write` would write into `src/movePrior.js`. Each
+is how far that feature's weight moves per `RATING_SCALE` (400) Elo above
+`RATING_PIVOT` (2000), so the served model is
+`weight_k(r) = base_k + slope_k · z(r)`:
+
+```jsonc
+// capture, promo, pawn, knight, bishop, rook, queen, king, castle
+{ "chess": { "MOVE_PRIOR_RATING_SLOPE": [0, 0, 0, 0, 0, -2.7, 0, 0, -34] } }
+```
+
+It is a LIST, so it replaces rather than deep-merges — a slope vector has no
+meaningful field-wise merge with a different one. It ships as **zeros**, so by
+default the opponent's rating changes nothing.
 
 ---
 
@@ -151,6 +168,11 @@ constant declared next to the code it tunes.
 | `gameSpecific.obscuro` | `createInitialState(players, { obscuro: {…} })` | one game |
 | constructor opts | `new ChessObscuroAgent({ particles: 32 })` | one agent |
 
+A preset and `--settings` share **one** layer (`loadSettings`): given both, the
+CLI merges them, preset underneath. So `--preset paper --set chess.SEARCH_WIN=8000`
+is "the paper's setup except for this one knob", which is the shape a sweep over
+a preset takes.
+
 The last two speak the agent's own opts vocabulary — `particles`,
 `timeBudgetMs`, `maxRounds`, `maxInfosets`, `expandPerRound`, `cfrPerRound`,
 `finalCfr`, `purifyMax`, `moveRings`, `moveSpokes`, `sfDepth` — rather than
@@ -164,11 +186,6 @@ give each its own knobs.
 
 Resolution happens at **read time**, per move — which is what lets a host
 configure the singleton after importing it.
-
-A preset and `--settings` share **one** layer (`loadSettings`): given both, the
-CLI merges them, preset underneath. So `--preset paper --set chess.SEARCH_WIN=8000`
-is "the paper's setup except for this one knob", which is the shape a sweep over
-a preset takes.
 
 ---
 
@@ -205,7 +222,7 @@ otherwise, so all of these do the obvious thing:
 ```
 
 Commands: `demo`, `move-quality`, `strength`, `calibrate`, `fit-prior`,
-`config`. Each also takes its own flags.
+`adopt-corpus`, `config`. Each also takes its own flags.
 
 ---
 

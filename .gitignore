@@ -6,3 +6,4 @@ node_modules/
 # SF_CACHE_DIR / setCacheDir() points elsewhere. It grows to tens of MB and is
 # reproducible by definition, so it never belongs in a commit.
 vendor/stockfish/sf-cache.*
+*.code-workspace

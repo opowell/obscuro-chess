@@ -26,7 +26,7 @@ Node 18+, with Stockfish 18 (lite, single-threaded WASM) vendored in.
 git clone --recurse-submodules https://github.com/opowell/obscuro-chess.git
 cd obscuro-chess
 node bin/obscuro-chess.js demo   # two agents play fog chess, each seeing only its own view
-npm test                         # 128 tests
+npm test                         # 158 tests
 ```
 
 ## Use it
@@ -111,21 +111,156 @@ that models nothing scores by definition:
 ```
 $ node scripts/calibrate-belief.mjs
 
-uniform-π                    logloss 5.891  baseline log|P| 6.200  Δ 0.309  medRank 151
-FITTED (shipped, in-sample)  logloss 4.839  baseline log|P| 6.200  Δ 1.361  medRank  23
+uniform-π          logloss 5.891  baseline log|P| 6.200  Δ 0.309  medRank 151
+FITTED (shipped)   logloss 4.882  baseline log|P| 6.200  Δ 1.318  medRank  29
 ```
 
 Δ is nats better than flat; medRank is where the true board sits in the belief's
 own ordering. The shipped prior's weights were fitted by
-`scripts/fit-move-prior.mjs`, not hand-tuned — see
-[docs/MOVE-PRIOR-PLAN.md](docs/MOVE-PRIOR-PLAN.md) for what that found (the
-king-safety weight comes out *negative*, and castling carries the model).
+`scripts/fit-move-prior.mjs`, not hand-tuned — on 246 Chess.com Fog of War games
+by 192 players, which makes the run above (over three *other* games) an
+out-of-sample one. See [docs/MOVE-PRIOR-PLAN.md](docs/MOVE-PRIOR-PLAN.md) for
+what the fit found: castling carries the model, and the one qualitative claim the
+earlier 37-game fit made — that fog players walk their kings out — turned out to
+be a single player's habit and vanished on the larger corpus.
 
 The other two scripts answer the question calibration cannot: whether a better
 belief converts into better play. `scripts/move-quality.mjs` scores chosen moves
 against a deep reference search; `scripts/strength-belief.mjs` plays seat-swapped
-self-play pairs. Both default to the three recorded games in `test/fixtures/`;
-point `--sessions <dir>` at a real corpus for anything conclusive.
+self-play pairs. `move-quality` defaults to the three recorded games in
+`test/fixtures/`; point `--sessions` at a real corpus for anything conclusive.
+
+## Fitting it on your own corpus
+
+**The nine numbers this package ships are the pre-built belief** — π is the only
+part of the belief that *can* be shipped, since P itself is per-game state. They
+were fitted on 246 Chess.com Fog of War games (14,836 decisions, 192 players).
+Refit them on your own games:
+
+```bash
+obscuro-chess fit-prior --sessions games.zip          # dir, .zip, .pgn or .json
+obscuro-chess fit-prior --sessions games.zip --e2e    # …gated on belief log-loss
+obscuro-chess fit-prior --sessions games.zip --write  # replace FITTED_WEIGHTS
+```
+
+`--sessions` takes a directory (walked recursively), a `.zip`, a PGN, a session
+JSON or a crawl JSON holding many games, any of them `.gz`. Games are filtered to
+fog chess and everything rejected is counted and explained — a corpus that
+half-loads says so rather than quietly producing a confident number over a third
+of the data. The same flag works for `calibrate` and `move-quality`.
+
+The `shipped` column in the CV table is the weights currently in the package,
+scored on the same held-out folds. It is the arm that decides whether a refit is
+worth taking, since `fitted` has been trained on the corpus and `shipped` has
+not.
+
+**Ratings.** PGN's `WhiteElo`/`BlackElo` (and a crawl's per-player Elo) carry how
+strong each player was, and `--rating` lets the opponent's rating tilt every
+weight *continuously* — filed by the rating of the seat that **made each
+decision**, since the two players are usually not the same strength:
+
+```
+weight_k(r) = FITTED_WEIGHTS_k + RATING_SLOPE_k · z(r),   z = (r − 2000) / 400
+```
+
+Continuous rather than bucketed on purpose: every rated decision informs every
+slope, instead of each bucket's nine weights being fitted on a third of the data,
+and there are no edges to choose and no jump between a 1899- and a 1901-rated
+opponent.
+
+```
+=== opponent rating as a continuous term — held-out, sloped vs flat ===
+  14614 of 14836 decisions carry a rating; ratings 1426–2466 (median 2001)
+  n=14614  uniform 3.405  flat 2.897  sloped 2.896  Δ +0.0003  no better than flat
+```
+
+**That is the real result on the corpus π is fitted on, and it is a null.** The
+fitted slopes are not small — the rook PST term moves −2.7 per 400 Elo, 64% of
+its own base — but they buy **0.0003 nats** out of sample, which means they are
+fitting noise. `RATING_SLOPE` ships as zeros because of this run, so serving
+reduces exactly to the flat model, and the machinery is here so the next corpus
+can overturn it.
+
+Per-band weights are a strictly larger model, so they fit training data better by
+construction and that fact is worth nothing. The gate is the only number that
+counts: on **held-out games of that band**, does the band's own π beat the pooled
+π? `--write` emits `RATING_WEIGHTS` for the bands that pass and leaves out the
+ones that don't, and serving falls back to the pooled model for any band the
+table lacks. `RATING_WEIGHTS` ships **empty** — no corpus has yet earned it.
+
+At runtime the opponent's rating tilts the model, since π models the opponent:
+
+```js
+FogChess.createInitialState([{ id: 'white' }, { id: 'black', rating: 1500 }], config);
+// …or state.gameSpecific.opponentRating = 1500
+```
+
+## Adopting a corpus, in one command
+
+Everything above — ingest health, the fit, the gate, the rating test — in the
+order that stops you shipping on a number you did not check:
+
+```bash
+obscuro-chess adopt-corpus games.zip           # measure, change nothing
+obscuro-chess adopt-corpus games.zip --write   # …and ship it if it wins
+```
+
+It refuses to go past ingest if the corpus does not mostly parse (the failure
+mode that produced a confident number over half a corpus once already), refuses
+to `--write` unless the refit beats the shipped weights on the **belief** gate,
+and prints the caveat below every time.
+
+## What a better prior does and does not buy
+
+**A better π is a better belief, and — at the shipped defaults — not yet better
+play.** π reaches move selection through exactly one channel: which worlds the
+search draws. Both switches that would let it are zero:
+
+| | ships at | meaning |
+|---|---|---|
+| `SAMPLE_ALPHA_DEFAULT` | 0 | worlds are drawn **uniformly** over P, ignoring π's weights |
+| `REACH_WEIGHTING_DEFAULT` | 0 | each drawn world gets flat 1/N reach, not its importance weight |
+
+So refitting π sharpens the belief that `calibrate` measures and the analysis
+panel displays, and leaves the played move untouched.
+
+**Turning α on is unresolved, not settled.** It used to be "measured twice and
+lost both times", quoting **+2.96 ± 2.62 cp in favour of α=0** from
+`move-quality --arm alpha`. That number is void: the harness committed the
+agent's own unplayed pick on top of the recorded move, which killed the exact
+belief on ply 2 and left both arms sampling the heuristic fallback — so α was
+never actually varied. Every pre-2026-08-07 `move-quality` number has the same
+defect, including the leaf-depth grid. Remeasured on a live P, 2,044 paired
+positions over 40 corpus games:
+
+| arm | paired cp (A − B) | sign test | reading |
+|---|---|---|---|
+| α=1 vs α=0 | −0.86 ± 1.66 | 52.4% for α=1 (z = 1.53) | mild lean **toward** α=1 |
+| reach β=1 vs β=0 | +2.25 ± 1.61 | 47.1% for β=1 (z = −1.83) | lean toward shipped β=0 |
+
+Neither reaches 2σ, so both defaults stay where they are — but the evidence that
+justified α=0 now points the other way, and the seat-swapped self-play result
+(4–11 for α=0, unaffected by the bug since it plays what it picks) disagrees with
+it. That is the honest state.
+
+**And it is not a dilution artefact.** The obvious explanation — a belief knob can
+only pay where something is hidden, and the average is swamped by turns where
+almost nothing is — was tested by recording |P| at every decision and regressing
+the paired difference on it. There is no relationship for either knob: the fits
+on rank(|P|) and log10|P| are null, and the one significant raw-|P| slope
+(t = −3.47) is carried entirely by the largest 5% of |P| and flips sign when they
+are dropped. How much is hidden does not predict where these knobs help.
+
+Converting belief accuracy into playing strength is therefore an open problem in
+this repo, and a bigger corpus is not on its own the answer to it.
+
+**One caveat worth more than the rest.** Fog chess and ordinary chess are
+different games, and π is fitted on *fog* behaviour: the king PST weight comes out
+negative because under fog players walk kings toward the centre, and capture is
+nearly worthless because the observation filter has already priced captures you
+can see. Fitting on a full-information PGN corpus will get both of those
+backwards — confidently. `--e2e` is the check that catches it; the `floor` term
+bounds what it can cost if you ship anyway.
 
 ## Layout
 
@@ -137,8 +272,12 @@ src/
                         evaluator the search falls back to)
   exactBelief.js        the exact position set P and its posterior
   belief.js             heuristic particle belief, for when P is lost
-  movePrior.js          π(move | position), the fitted opponent model
+  movePrior.js          π(move | position), the fitted opponent model, and the
+                        optional per-rating-band table over it
   beliefCalibration.js  the replay walk both the tests and the scripts use
+  corpus.js pgn.js zip.js
+                        reading recorded games back in: directories, zips, PGN
+                        (with ratings) and session JSON, behind one loader
   stockfish.js          the vendored engine (Node worker / browser Worker)
   FogChess.js           the GameDefinition tying it together
   board.js moves.js fen.js pieceTables.js
@@ -151,7 +290,7 @@ src/
 bin/obscuro-chess.js    demo, the tuning harnesses and `config`, in one command
 vendor/obscuro/         the generic search (submodule: opowell/obscuro-ai)
 vendor/stockfish/       Stockfish 18 lite, single-threaded WASM
-test/                   128 tests, incl. three real recorded games as fixtures
+test/                   158 tests, incl. three real recorded games as fixtures
 docs/                   parameters, how to change one, and the design plans
 scripts/                calibration, prior fitting, move quality, strength
 ```

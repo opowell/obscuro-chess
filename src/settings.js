@@ -63,10 +63,18 @@ export {
 // turns the exact belief from a set into a distribution. FITTED_WEIGHTS is
 // the production model (fitted by MLE, not hand-tuned — see the file's own
 // header before changing any of its numbers).
-// MOVE_PRIOR_UNIFORM turns the model off entirely and serves the uniform
-// baseline instead — no opponent model, which is the paper's own setting.
+// RATING_SLOPE tilts those weights by the opponent's rating, continuously
+// (weight_k(r) = base_k + slope_k·z, z = (r − PIVOT)/SCALE, |z| ≤ Z_CLAMP). It
+// ships as ZEROS, and stays that way until a corpus with ratings shows the tilt
+// beats the flat model out of sample; the pivot/scale/clamp describe the corpus
+// the slopes were fitted on, so a host serving its own slopes sets them too.
+// MOVE_PRIOR_UNIFORM turns the model off entirely (the paper's setting).
 export {
   FITTED_WEIGHTS as MOVE_PRIOR_FITTED_WEIGHTS,
+  RATING_SLOPE as MOVE_PRIOR_RATING_SLOPE,
+  RATING_PIVOT as MOVE_PRIOR_RATING_PIVOT,
+  RATING_SCALE as MOVE_PRIOR_RATING_SCALE,
+  RATING_Z_CLAMP as MOVE_PRIOR_RATING_Z_CLAMP,
   UNIFORM_ONLY as MOVE_PRIOR_UNIFORM,
 } from './movePrior.js';
 

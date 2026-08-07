@@ -4,6 +4,7 @@
 
 const LETTER = { king: 'k', queen: 'q', rook: 'r', bishop: 'b', knight: 'n', pawn: 'p' };
 const PROMO = { q: 'queen', r: 'rook', b: 'bishop', n: 'knight' };
+const TYPE = { k: 'king', q: 'queen', r: 'rook', b: 'bishop', n: 'knight', p: 'pawn' };
 
 /**
  * Convert an internal board + game-state to a FEN string.
@@ -59,6 +60,57 @@ export function toFEN(board, gs, sideToMove = 'w', fullmove = 1) {
     if (cr.black?.queenSide && homeOk('black', 'queenSide')) castle += 'q';
   }
   return `${rows.join('/')} ${sideToMove} ${castle || '-'} ${gs?.enPassantTarget || '-'} ${gs?.halfMoveClock ?? 0} ${fullmove}`;
+}
+
+/**
+ * Parse a FEN into the pieces `FogChess.createInitialState` takes as config:
+ * `{ board, toMove, castlingRights, enPassantTarget, halfMoveClock, turnNumber }`.
+ *
+ * The inverse of `toFEN`, and it exists for the corpus loader: a recorded game
+ * may carry a `[FEN]` tag, and a loader that silently ignored it would replay
+ * every move of that game against the wrong board — producing a plausible-looking
+ * stream of decisions that are all mismatched. Better to be able to read it.
+ *
+ * Unit ids are synthesised (`wP1`, `bN2`, …) in scan order. Nothing downstream
+ * derives meaning from an id beyond uniqueness — the belief works on piece type
+ * and owner — but they must be distinct, so the counter runs across the board.
+ */
+export function fromFEN(fen) {
+  const parts = String(fen).trim().split(/\s+/);
+  if (parts.length < 2) throw new Error(`fen: not a FEN: ${JSON.stringify(fen)}`);
+  const [placement, side, castle = '-', ep = '-', half = '0', full = '1'] = parts;
+
+  const board = {};
+  const rows = placement.split('/');
+  if (rows.length !== 8) throw new Error(`fen: expected 8 ranks, got ${rows.length}`);
+  let n = 0;
+  rows.forEach((row, i) => {
+    const rank = 8 - i;
+    let fileIdx = 0;
+    for (const ch of row) {
+      if (ch >= '1' && ch <= '8') { fileIdx += Number(ch); continue; }
+      const type = TYPE[ch.toLowerCase()];
+      if (!type) throw new Error(`fen: unknown piece "${ch}"`);
+      if (fileIdx > 7) throw new Error(`fen: rank ${rank} overflows the board`);
+      const sq = 'abcdefgh'[fileIdx] + rank;
+      const ownerId = ch === ch.toUpperCase() ? 'white' : 'black';
+      const id = (ownerId === 'white' ? 'w' : 'b') + ch.toUpperCase() + (++n);
+      board[sq] = { id, ownerId, type, position: sq, alive: true };
+      fileIdx++;
+    }
+  });
+
+  return {
+    board,
+    toMove: side === 'b' ? 'black' : 'white',
+    castlingRights: {
+      white: { kingSide: castle.includes('K'), queenSide: castle.includes('Q') },
+      black: { kingSide: castle.includes('k'), queenSide: castle.includes('q') },
+    },
+    enPassantTarget: ep === '-' ? null : ep,
+    halfMoveClock: Number(half) || 0,
+    turnNumber: Number(full) || 1,
+  };
 }
 
 /**

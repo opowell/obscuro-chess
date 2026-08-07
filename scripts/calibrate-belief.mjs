@@ -17,9 +17,10 @@
 // replays the three fixtures the tests use, which is a smoke test, not a fit.
 // ---------------------------------------------------------------------------
 
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadCorpus, describeCorpus } from '../src/corpus.js';
 import { replayBelief, mean } from '../src/beliefCalibration.js';
 import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from '../src/movePrior.js';
 import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
@@ -51,11 +52,13 @@ const PRIORS = taus
      ...taus.split(',').map(t => [`τ=${t}`, makeMovePrior({ temperature: Number(t) })])]
   : [
     ['uniform-π', UNIFORM_PRIOR],
-    // The shipped model. NOTE it is fitted on these same sessions, so its number
-    // here is IN-SAMPLE and flattering; the honest held-out comparison is
-    // `fit-move-prior.mjs --e2e`, which refits per fold. This arm is for
-    // "did anything regress", not for quoting.
-    ['FITTED (shipped, in-sample)', makeMovePrior(FITTED_WEIGHTS)],
+    // The shipped model. Whether this arm's number is in-sample depends on what
+    // you point --sessions at: the weights are fitted on a Chess.com Fog of War
+    // crawl, so they are OUT of sample on the bundled fixtures and IN sample on
+    // that crawl. Either way the honest held-out comparison is
+    // `fit-move-prior.mjs --e2e`, which refits per fold. This arm is for "did
+    // anything regress", not for quoting.
+    ['FITTED (shipped)', makeMovePrior(FITTED_WEIGHTS)],
     ['τ=800', makeMovePrior({ temperature: 800 })],
     ['τ=400', makeMovePrior({ temperature: 400 })],
     ['τ=300', makeMovePrior({ temperature: 300 })],
@@ -69,25 +72,13 @@ const PRIORS = taus
   ];
 
 if (!existsSync(SESSIONS)) {
-  console.error(`No sessions at ${SESSIONS}.\n` +
-    'Pass --sessions <dir> pointing at a directory of recorded session JSONs.');
+  console.error(`No corpus at ${SESSIONS}.\n` +
+    'Pass --sessions <path> pointing at a directory, .zip, .pgn or .json of recorded fog games.');
   process.exit(1);
 }
 
-const games = [];
-for (const f of readdirSync(SESSIONS).sort()) {
-  if (!f.endsWith('.json')) continue;
-  let sess;
-  try { sess = JSON.parse(readFileSync(join(SESSIONS, f), 'utf8')); } catch { continue; }
-  const p = sess.params;
-  if (p?.game !== 'chess') continue;
-  const c = p.config ?? {};
-  if (!(c.fogOfWar || c.fog)) continue;
-  if ((sess.log?.length ?? 0) < 10) continue;
-  games.push({ file: f, sess });
-  if (games.length >= maxGames) break;
-}
-console.log(`${games.length} chess fog games, seats: ${seats.join('+')}\n`);
+const { games, stats } = loadCorpus(SESSIONS, { maxGames });
+console.log(`${describeCorpus(games, stats)}; seats: ${seats.join('+')}\n`);
 
 const rows = [];
 for (const [label, prior] of PRIORS) {
