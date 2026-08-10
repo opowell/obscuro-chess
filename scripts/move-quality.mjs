@@ -5,6 +5,7 @@
 //   node scripts/move-quality.mjs --arm null             # THE CONTROL. run it.
 //   node scripts/move-quality.mjs --arm prior            # fitted π vs uniform π
 //   node scripts/move-quality.mjs --alphas 0.5,0 --games 8 --ref-depth 14
+//   node scripts/move-quality.mjs --arm temper --min-plies 0   # take every game
 //
 // WHY THIS EXISTS. `strength-belief.mjs` plays whole games and counts wins, and
 // it cannot resolve anything: White scores ~57.5% in the paper's own 10,000-game
@@ -69,6 +70,9 @@ const arg = makeArgReader(argv);
 const SESSIONS = arg('sessions', join(HERE, '..', 'test', 'fixtures'));
 const armName = arg('arm', 'alpha');
 const maxGames = Number(arg('games', '6'));
+// See the loadCorpus call below for why the floor is 20 and not the loader's 10.
+// `--min-plies 0` keeps every game the corpus offers.
+const minPlies = Number(arg('min-plies', '20'));
 const maxPlies = Number(arg('max-plies', '60'));
 const refDepth = Number(arg('ref-depth', '12'));
 
@@ -159,10 +163,18 @@ if (!existsSync(SESSIONS)) {
   console.error(`No corpus at ${SESSIONS} — pass --sessions <dir|zip|pgn|json>.`);
   process.exit(1);
 }
-// 20 plies, not the loader's default 10: this harness measures move quality
-// against a deep reference search, and an opening-only game contributes almost
-// nothing but costs a full Stockfish pass per ply.
-const { games, stats: corpusStats } = loadCorpus(SESSIONS, { maxGames, minPlies: 20 });
+// DEFAULT 20 plies, not the loader's default 10: this harness measures move
+// quality against a deep reference search, and an opening-only game contributes
+// almost nothing but costs a full Stockfish pass per ply. It is a default and
+// not a law — `--min-plies 0` takes everything — but changing it changes the
+// corpus, so a run at a different floor is NOT comparable with the recorded
+// numbers in exactBelief.js, which were all measured at 20.
+//
+// It matters more here than the ply cost suggests: a belief knob can only act
+// through what is hidden, and |P| grows with the game. Short games are the part
+// of the corpus where every arm is closest to agreeing, so admitting them adds
+// positions faster than it adds signal.
+const { games, stats: corpusStats } = loadCorpus(SESSIONS, { maxGames, minPlies });
 if (!games.length) {
   console.error(`No chess fog games in ${SESSIONS}.\n  ${describeCorpus(games, corpusStats)}`);
   process.exit(1);
