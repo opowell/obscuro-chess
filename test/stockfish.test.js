@@ -85,6 +85,15 @@ test('multiPV: the cache returns the same lines however often it is read', async
   // eventually EVICTED; it must never change, drop or corrupt what a hit
   // returns. Everything downstream — the leaf evaluator, every measurement
   // harness — assumes a cached position answers identically to a fresh one.
+  //
+  // FRESH_HASH is what MAKES that assumption true, so this test pins it on. Test
+  // files run in parallel processes against one shared cache: another process can
+  // evict this entry mid-loop, and the recomputation only matches the original if
+  // the engine has forgotten what it saw in between. Without this the test failed
+  // roughly one run in two — a real flake, and a fair description of what the
+  // default still does to anything that recomputes after an eviction.
+  setFreshHash(true);
+  t.after(() => setFreshHash(null));
   const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
   const first = await multiPV(fen, { multipv: 5, depth: 4 });
   assert.ok(Array.isArray(first) && first.length >= 2);

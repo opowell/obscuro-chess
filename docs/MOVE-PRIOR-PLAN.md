@@ -789,26 +789,41 @@ weights are supplied, so every other game and the heuristic particle path are
 untouched. Behind `setBeliefReachWeightingForSeat`; `exact-belief.test.js` pins
 the channel open.
 
-Measured three times, 1,420 paired positions each (`move-quality.mjs`). **The
-first run was invalid**: it predated the multiPV depth-sweep fix
-([FOG-AI-FIX-PLAN.md](FOG-AI-FIX-PLAN.md)), which was dropping ~10% of leaf values
-onto the static evaluator — and that degradation penalises the WEIGHTED arm harder,
-exactly as predicted, because a bad leaf value in a heavily-weighted world costs
-more. Its verdict inverted once the bug was fixed:
+**CLOSED 2026-08-11: no effect, and every number this section used to quote was
+void.** The knob was measured five times across four months and the verdict
+swung between "+24 cp against" and "−27 cp for" — all of it instrument noise.
+Three separate defects, each found only after the previous fix made the next one
+visible:
+
+1. the multiPV depth-sweep bug dropped ~10% of leaf values onto the static
+   evaluator ([FOG-AI-FIX-PLAN.md](FOG-AI-FIX-PLAN.md));
+2. the harness committed the agent's own unplayed pick on top of the recorded
+   move, killing exact `P` by ply 2 so that *both* arms ran on the heuristic
+   fallback and β was not connected to anything;
+3. `go depth N` was not a pure function of the position — the engine carried its
+   transposition table between searches, and the LRU cache hid that until a long
+   run filled it. Two identically configured arms diverged on 39% of moves.
+
+On the first harness whose null control holds (100.0% identical, 0.00 cp), over
+100 crawl games / 6,150 paired positions:
 
 | arm | mean paired Δ (− favours weighting) | sign test |
 |---|---|---|
-| β=1, before the leaf fix (VOID) | +24.44 ± 18.85 (z = 1.30) | 46.8% (z = −1.29) |
-| β=1, after | **−5.37 ± 20.72 (z = −0.26)** | 48.9% (z = −0.44) |
-| β=0.5 tempered, after | **−27.06 ± 15.08 (z = −1.79)** | 48.0% (z = −0.77) |
+| β=1 | **+0.46 ± 1.03 (z = 0.45)** | 49.7% (z = −0.37) |
+| β=0.5 tempered | **−1.35 ± 1.03 (z = −1.30)** | 51.3% (z = 1.46) |
 
-**Still `REACH_WEIGHTING_DEFAULT = 0` (off), but no longer because the evidence is
-against it — because it is not yet for it.** Nothing reaches 2σ, and for the
-tempered arm the two statistics DISAGREE: the mean says weighting avoids enough
-large losses to be worth ~27 cp/move, while the sign test says it wins slightly
-fewer positions outright. That is the signature of a heavy-tailed metric where the
-effect lives in the tail — plausible for a belief change (it should matter in the
-sharp positions, not the quiet ones) and equally consistent with noise.
+β=0.5's mild lean does not survive splitting: it is **−0.04 ± 1.06** on the
+exact-`|P|` subset and −2.59 ± 1.75 on the positions where exact tracking was
+lost, i.e. concentrated exactly where β acts on the fallback rather than on the
+posterior.
+
+A post-hoc median split of `|P|` looked like a real interaction (β=1: −2.27 below
+408, +3.03 above, contrast z = 2.56). It was **pre-registered on a
+non-overlapping holdout with the threshold fixed in advance, and refuted**:
+−0.55 ± 1.06 and +0.66 ± 2.17, contrast +1.21 ± 2.41, z = 0.50.
+
+`REACH_WEIGHTING_DEFAULT = 0` (off), now because the evidence says so rather than
+by default. **Do not reopen this on a subgroup.**
 
 **What blocks a verdict is still measurement quality: these runs logged 20–21%
 static-eval fallbacks**, against 5–8% in a short grid run at the same leaf depth.
