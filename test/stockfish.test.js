@@ -77,6 +77,21 @@ test('multiPV returns several scored candidate moves (batched leaf heuristic)', 
   }
 });
 
+test('multiPV: the cache returns the same lines however often it is read', async (t) => {
+  if (!(await available())) { t.skip('vendored stockfish failed to load'); return; }
+  // The LRU touch is sampled (one read in TOUCH_EVERY writes), so reads cross
+  // that boundary several times here. Sampling may change which entry is
+  // eventually EVICTED; it must never change, drop or corrupt what a hit
+  // returns. Everything downstream — the leaf evaluator, every measurement
+  // harness — assumes a cached position answers identically to a fresh one.
+  const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  const first = await multiPV(fen, { multipv: 5, depth: 4 });
+  assert.ok(Array.isArray(first) && first.length >= 2);
+  for (let i = 0; i < 100; i++) {
+    assert.deepEqual(await multiPV(fen, { multipv: 5, depth: 4 }), first, `read ${i} differed`);
+  }
+});
+
 test('perfect-info agents use Stockfish and do not blunder the knight', async (t) => {
   if (!(await available())) { t.skip('vendored stockfish failed to load'); return; }
   const isBlunder = a => a.from === 'f6' && a.to === 'd5';

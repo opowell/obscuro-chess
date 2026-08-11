@@ -164,6 +164,31 @@ function loadCache() {
     // fall back to the in-memory/NDJSON path instead of crashing callers.
     try {
       db = new DatabaseSync(cachePath('sqlite'));
+      // WAL + synchronous=NORMAL. Without these sqlite defaults to a rollback
+      // journal at synchronous=FULL, which fsyncs every write — and cacheGet
+      // WRITES ON EVERY READ (the LRU touch below), so every cache HIT was
+      // paying for a durable disk commit: 288 µs, against 8.7 µs for the read
+      // itself. At ~2.8k leaf evaluations per move that is most of a second per
+      // move spent fsyncing an LRU column.
+      //
+      // Safe here for a reason specific to what this file is: the table is a
+      // memo of a PURE function (multiPV is deterministic in fen/depth/multipv,
+      // which is the premise of caching it at all). synchronous=NORMAL risks
+      // losing the last transactions on an OS crash and cannot corrupt the
+      // database; losing them costs a re-search, not a wrong answer.
+      //
+      // WAL also helps the case the catch below exists for — concurrent
+      // processes sharing this file, e.g. parallel test files or two harnesses
+      // — since readers no longer block on the writer.
+      //
+      // Failing to set them is not a reason to fall back to NDJSON: the cache is
+      // completely correct without them, just slower. (WAL needs a real local
+      // filesystem; on the exotic ones where it doesn't take, this leaves the
+      // journal mode alone and carries on.)
+      try {
+        db.exec('PRAGMA journal_mode = WAL');
+        db.exec('PRAGMA synchronous = NORMAL');
+      } catch { /* keep the default journal mode — slower, equally correct */ }
       db.exec(`CREATE TABLE IF NOT EXISTS cache (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -203,6 +228,23 @@ function compactNdjson() {
   catch { /* ignore */ }
 }
 
+// SAMPLED LRU. Recording recency exactly costs one UPDATE per read, and a read
+// is otherwise the cheap path — with the PRAGMAs above that is 21.6 µs against
+// 6.3 µs, and without them 288 µs against 8.7 µs. So only one read in
+// TOUCH_EVERY writes, which is enough to keep the ordering usable: an entry's
+// chance of being touched is proportional to its share of reads, so hot entries
+// still float and cold ones still sink — just at 1/32 the resolution, and with
+// new entries already protected because cacheSet stamps a fresh lru.
+//
+// This is an approximation of the eviction ORDER, and nothing else. It cannot
+// change an answer: a wrongly evicted entry is recomputed by the engine to the
+// same value (see the determinism note above). Worst case it costs a re-search.
+//
+// A counter rather than a random sample so a measurement harness re-running the
+// same positions evicts the same way twice.
+const TOUCH_EVERY = 32;
+let touchTick = 0;
+
 // Every cache key is namespaced by ENGINE_TAG here, in ONE place, so no call
 // site can forget and read another engine's numbers back as this one's.
 function cacheGet(rawKey) {
@@ -213,7 +255,7 @@ function cacheGet(rawKey) {
     try {
       const row = stmtGet.get(key);
       if (!row) return undefined;
-      stmtTouch.run(++lruSeq, key);
+      if (++touchTick % TOUCH_EVERY === 0) stmtTouch.run(++lruSeq, key);
       return JSON.parse(row.value);
     } catch { return undefined; }
   }
