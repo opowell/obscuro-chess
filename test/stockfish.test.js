@@ -4,7 +4,8 @@ import { FogChess } from '../src/FogChess.js';
 import { ObscuroAgent } from '../src/ObscuroAgent.js';
 import { ChessAgent } from '../src/ChessAgent.js';
 import { toFEN, uciToAction } from '../src/fen.js';
-import { available, bestMove, multiPV, quit } from '../src/stockfish.js';
+import { available, bestMove, multiPV, quit, setFreshHash } from '../src/stockfish.js';
+import { setOverrides, resetSettings } from '../src/config.js';
 
 after(() => quit());
 
@@ -89,6 +90,38 @@ test('multiPV: the cache returns the same lines however often it is read', async
   assert.ok(Array.isArray(first) && first.length >= 2);
   for (let i = 0; i < 100; i++) {
     assert.deepEqual(await multiPV(fen, { multipv: 5, depth: 4 }), first, `read ${i} differed`);
+  }
+});
+
+// The test above pins the CACHE; this one pins the ENGINE BEHIND IT, which is
+// the half that was actually broken. A cached position answering identically to
+// a fresh one is worth nothing if the fresh one answers differently each time —
+// and it did, until FRESH_HASH: Stockfish keeps its transposition table across
+// searches, so the LRU hid the problem right up until a long run filled the
+// cache and started recomputing. CACHE_MAX=1 reproduces that thrash in three
+// calls.
+test('multiPV is reproducible across intervening searches when FRESH_HASH is on', async (t) => {
+  if (!(await available())) { t.skip('vendored stockfish failed to load'); return; }
+  const target = 'r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 1';
+  const other = 'rnbq1rk1/ppp1ppbp/3p1np1/8/2PPP3/2N2N2/PP2BPPP/R1BQK2R w KQ - 0 1';
+  // depth 10 and THREE recomputations, because the bug is depth-sensitive: at
+  // depth 8 this same sequence happens to come back stable even unfixed, and a
+  // test that passes without the fix is worse than no test. Unfixed, the three
+  // answers here are three different scores for the same position.
+  setOverrides({ chess: { CACHE_MAX: 1 } });   // every write evicts the previous
+  setFreshHash(true);
+  try {
+    const a = await multiPV(target, { multipv: 4, depth: 10 });
+    await multiPV(other, { multipv: 4, depth: 10 });   // pollute the table
+    const b = await multiPV(target, { multipv: 4, depth: 10 });
+    await multiPV(other, { multipv: 4, depth: 10 });
+    const c = await multiPV(target, { multipv: 4, depth: 10 });
+    assert.ok(a?.length, 'engine returned lines');
+    assert.deepEqual(b, a, 'same fen + depth must give the same lines');
+    assert.deepEqual(c, a, 'and must keep giving them');
+  } finally {
+    setFreshHash(null);
+    resetSettings();
   }
 });
 

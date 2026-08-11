@@ -55,7 +55,7 @@ import {
   setBeliefSampleAlphaForSeat, setMovePriorForSeat, setBeliefReachWeightingForSeat,
 } from '../src/exactBelief.js';
 import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from '../src/movePrior.js';
-import { quit as stockfishQuit } from '../src/stockfish.js';
+import { quit as stockfishQuit, setFreshHash } from '../src/stockfish.js';
 import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -109,6 +109,14 @@ const knobs = {
 const CLIP = Number(arg('clip', '300'));
 const clipLoss = x => (CLIP > 0 ? Math.min(x, CLIP) : x);
 const seed0 = Number(arg('seed', '12345'));
+// THE PAIRED DESIGN REQUIRES THIS. `go depth N` is not a pure function of the
+// position — Stockfish carries its transposition table between searches — and
+// the cache only hides that until it fills. Past `CACHE_MAX` entries a run of
+// this size thrashes, positions get recomputed against a different table, and
+// two IDENTICAL arms drift apart: measured at 39% of moves disagreeing, on a
+// corpus where half the divergence sat on positions with a single possible
+// board. `--fresh-hash 0` restores the old (fast, unsound) behaviour.
+setFreshHash(arg('fresh-hash', '1') !== '0');
 // --verbose prints per-ply cost, which is how the ms/move mystery got solved.
 const VERBOSE = argv.includes('--verbose');
 const seatArg = arg('seat', 'both');

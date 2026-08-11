@@ -129,6 +129,33 @@ if (isNode) { try { ({ DatabaseSync } = await import('node:sqlite')); } catch {}
 export const CACHE_MAX = 20_000;
 const cacheMax = () => param('chess.CACHE_MAX', CACHE_MAX);
 
+// SAME QUESTION, SAME ANSWER — off by default, because it costs real speed.
+//
+// `go depth N` is NOT a pure function of the position. Stockfish keeps its
+// transposition table across searches, so the same FEN at the same depth can
+// come back with a different PV depending on what the engine looked at before
+// it; `maybeRecycle` respawning the worker on a cumulative CALL COUNT moves
+// those boundaries around too. Nothing above notices, because every answer is
+// individually plausible.
+//
+// It stayed invisible while the cache absorbed it: ask twice, and the second
+// ask is a cache hit. But the cache is an LRU of `CACHE_MAX` entries and a
+// move-quality run touches millions of leaves, so past the cap it thrashes,
+// the same position is recomputed against a different table, and the answers
+// disagree. That is what broke the A/B null control — two arms configured
+// IDENTICALLY diverged on 39% of moves, including on positions where only ONE
+// board was possible and no belief could have been involved. Any paired
+// measurement needs this on; see scripts/move-quality.mjs.
+export const FRESH_HASH = false;
+let explicitFreshHash = null;
+/** Force fresh-hash on/off programmatically (harnesses); `null` defers to settings. */
+export function setFreshHash(on) { explicitFreshHash = on == null ? null : !!on; }
+const freshHash = () => explicitFreshHash ?? param('chess.FRESH_HASH', FRESH_HASH);
+// `ucinewgame` clears the table and the heuristics derived from it. Commands
+// are serialised through one queue, so ordering with the following `position`
+// and `go` is guaranteed without an `isready` round-trip.
+const freshHashCmds = () => (freshHash() ? ['ucinewgame'] : []);
+
 // WHERE the cache lives. It defaults next to the engine, but it is derived data,
 // not part of the package: an embedder that already has a warm cache (a few tens
 // of MB of it, in battle-simulator's case) keeps it in its OWN checkout and points
@@ -435,7 +462,7 @@ function request(commands, isDone, timeoutMs, { isCancelled, onStopped } = {}) {
  */
 export async function bestMove(fen, { movetime = 300, skill = null } = {}) {
   if (!(await init())) return null;
-  const cmds = ['setoption name MultiPV value 1'];
+  const cmds = [...freshHashCmds(), 'setoption name MultiPV value 1'];
   if (skill != null) cmds.push(`setoption name Skill Level value ${skill}`);
   cmds.push('position fen ' + fen, 'go movetime ' + movetime);
   const uci = await request(cmds, line => (line.startsWith('bestmove') ? (line.split(/\s+/)[1] || null) : undefined), movetime + 5000);
@@ -451,7 +478,7 @@ export async function evaluate(fen, { movetime = 100 } = {}) {
   if (!(await init())) return null;
   let last = null;
   const val = await request(
-    ['setoption name MultiPV value 1', 'position fen ' + fen, 'go movetime ' + movetime],
+    [...freshHashCmds(), 'setoption name MultiPV value 1', 'position fen ' + fen, 'go movetime ' + movetime],
     (line) => {
       const m = line.match(/score (cp|mate) (-?\d+)/);
       if (m) last = m[1] === 'cp' ? Number(m[2]) : (m[2] > 0 ? 100000 - Number(m[2]) : -100000 - Number(m[2]));
@@ -509,7 +536,7 @@ export async function multiPV(fen, { multipv = 10, depth = 2, onInfo, isCancelle
   };
   let lastReportedDepth = 0;
   let stopped = false;
-  const cmds = [`setoption name MultiPV value ${multipv}`, 'position fen ' + fen, 'go depth ' + depth];
+  const cmds = [...freshHashCmds(), `setoption name MultiPV value ${multipv}`, 'position fen ' + fen, 'go depth ' + depth];
   const result = await request(
     cmds,
     (line) => {

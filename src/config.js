@@ -135,7 +135,7 @@ export const SETTING_PATHS = {
     // …or no opponent model at all: uniform π, which is the paper's setting.
     MOVE_PRIOR_UNIFORM: b,
     // stockfish.js — the vendored engine backend.
-    RECYCLE_AFTER: n, CACHE_MAX: n, STOP_POLL_MS: n, SF_CACHE_DIR: s,
+    RECYCLE_AFTER: n, CACHE_MAX: n, STOP_POLL_MS: n, SF_CACHE_DIR: s, FRESH_HASH: b,
     LEGACY_DIFFICULTY: { easy: n, medium: n, hard: n, expert: n },
     SF_DIFFICULTY_RAMP: { movetimeMs: d, skill: d },
   },

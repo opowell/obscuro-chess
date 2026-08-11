@@ -63,7 +63,7 @@ export {
 
 // --- Engine ---------------------------------------------------------------
 export {
-  available, bestMove, multiPV, quit, setCacheDir,
+  available, bestMove, multiPV, quit, setCacheDir, setFreshHash,
   stockfishBestAction, sfOptsForDifficulty, difficultyToNumber,
 } from './stockfish.js';
 
