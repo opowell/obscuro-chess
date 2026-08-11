@@ -106,6 +106,38 @@ let callsSinceLoad = 0;
 export const RECYCLE_AFTER = 400;
 const recycleAfter = () => param('chess.RECYCLE_AFTER', RECYCLE_AFTER);
 
+// A RESPAWN CHANGES THE ANSWERS, so who decides when one happens is a
+// correctness question and not only a memory one.
+//
+// The counter above is ENGINE CALLS, and a cache hit never reaches the engine.
+// Two arms of a paired measurement therefore reach 400 at different plies —
+// the first arm runs against a cold cache and calls the engine constantly, the
+// second inherits those entries and calls it far less — so they respawn at
+// different points in the same position stream. And a fresh worker is NOT
+// equivalent to a `ucinewgame`'d one: with FRESH_HASH already on, suppressing
+// recycling still moved the move-quality null control from 84.5% agreement
+// (-1.46 ± 2.42 cp between two IDENTICAL configurations) to 100.0% and
+// 0.00 ± 0.00 cp. Whatever the respawn resets, `ucinewgame` does not.
+//
+// So the boundary has to be a function of something both arms share. Nothing
+// inside this module qualifies — the engine cannot see the position stream —
+// which leaves the caller. `setAutoRecycle(false)` switches the count-based
+// trigger off and hands the decision over; the caller then calls
+// `recycleEngine()` at a boundary of its own, unconditionally, so both arms
+// respawn at exactly the same points. move-quality.mjs does this per
+// game/seat/arm.
+//
+// Play keeps the automatic trigger (nothing is being compared, and the memory
+// argument is the only one that applies). The cost of manual mode is that heap
+// safety becomes the caller's: one unit of work must stay under the abort, so
+// declare boundaries at least as often as RECYCLE_AFTER would have fired. A
+// game/seat replay is ~1.6k engine calls, and 39k calls in one process did not
+// abort while measuring the above, so that is a comfortable margin — but it is
+// a margin, not a guarantee.
+let autoRecycle = true;
+/** Let the caller own the respawn boundary (harnesses); `true` restores the counter. */
+export function setAutoRecycle(on) { autoRecycle = !!on; }
+
 // Abort callbacks for in-flight requests. When the worker dies mid-search we
 // call these to resolve each pending request as null immediately, rather than
 // leaving it to wait out its (multi-second) timeout.
@@ -198,11 +230,18 @@ function loadCache() {
       // itself. At ~2.8k leaf evaluations per move that is most of a second per
       // move spent fsyncing an LRU column.
       //
-      // Safe here for a reason specific to what this file is: the table is a
-      // memo of a PURE function (multiPV is deterministic in fen/depth/multipv,
-      // which is the premise of caching it at all). synchronous=NORMAL risks
-      // losing the last transactions on an OS crash and cannot corrupt the
-      // database; losing them costs a re-search, not a wrong answer.
+      // Safe because of what the table is: a memo of an evaluation that is
+      // recomputable at will. synchronous=NORMAL risks losing the last
+      // transactions on an OS crash and cannot corrupt the database, so the
+      // cost of losing them is a re-search.
+      //
+      // NOT because a re-search returns the same number — it does not, unless
+      // FRESH_HASH is on. This comment claimed otherwise when it was written,
+      // citing a purity that `go depth N` only has under `ucinewgame`. For PLAY
+      // that distinction does not matter (every one of those answers is a valid
+      // depth-N evaluation); for a paired MEASUREMENT it decides the result,
+      // which is what FRESH_HASH and the caller-owned respawn boundary above
+      // are for.
       //
       // WAL also helps the case the catch below exists for — concurrent
       // processes sharing this file, e.g. parallel test files or two harnesses
@@ -263,9 +302,12 @@ function compactNdjson() {
 // still float and cold ones still sink — just at 1/32 the resolution, and with
 // new entries already protected because cacheSet stamps a fresh lru.
 //
-// This is an approximation of the eviction ORDER, and nothing else. It cannot
-// change an answer: a wrongly evicted entry is recomputed by the engine to the
-// same value (see the determinism note above). Worst case it costs a re-search.
+// This approximates the eviction ORDER and nothing else — it never changes what
+// a HIT returns. It does change which entries survive, and an entry recomputed
+// after eviction only comes back with the same number when FRESH_HASH is on
+// (the correction above; this comment used to assert it unconditionally, which
+// was wrong). Under a paired measurement that matters, which is why such runs
+// turn FRESH_HASH on and own the respawn boundary; for play it does not.
 //
 // A counter rather than a random sample so a measurement harness re-running the
 // same positions evicts the same way twice.
@@ -390,7 +432,13 @@ export function quit() {
 // (between requests), so no search is ever interrupted. Terminating a whole
 // worker (vs. reloading in-process) is what actually reclaims the memory.
 async function maybeRecycle() {
-  if (callsSinceLoad < recycleAfter()) return;
+  if (!autoRecycle || callsSinceLoad < recycleAfter()) return;
+  await respawn();
+}
+
+// The respawn itself, with no policy attached — `maybeRecycle` decides on the
+// call count, `recycleEngine` on the caller's say-so.
+async function respawn() {
   callsSinceLoad = 0;
   const old = worker;
   worker = null; readyPromise = null; listeners = [];
@@ -399,6 +447,22 @@ async function maybeRecycle() {
     else old.terminate();
   }
   await init();
+}
+
+/**
+ * Respawn the engine now, whatever the call count says — the caller-owned
+ * boundary described above. Queued behind any in-flight search, so it can be
+ * called at any time without interrupting one, and it resets the counter, so a
+ * caller declaring boundaries never fights the automatic trigger.
+ *
+ * Call it unconditionally at the same point in every arm. Calling it only when
+ * some condition holds reintroduces exactly the bug it exists to fix, because
+ * the condition can differ between arms.
+ */
+export function recycleEngine() {
+  const p = queue.then(respawn, respawn);
+  queue = p.catch(() => {});   // same as request(): the stored queue must never reject
+  return p;
 }
 
 // How often an in-flight search re-checks its caller's `isCancelled` (see below).

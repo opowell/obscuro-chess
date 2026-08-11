@@ -34,15 +34,21 @@
 // less compute than resolving the same question with games. Do not quote it as
 // "strength" — quote it as "cp lost per move against perfect information".
 //
-// PROTOCOL NOTES (all three are scar tissue from OBSCURO-MOVE-PRIOR-PLAN.md):
+// PROTOCOL NOTES (every one of them is scar tissue):
 //  1. A FRESH agent per arm per game. The exported singleton's `_carry` map holds
 //     the KLUSS search tree per colour and is never reset — reusing it makes
 //     results order-dependent, which once produced a completely fictional 0/16.
 //  2. A FRESH `players` array per arm. Both belief stores are WeakMaps keyed by
 //     that array's identity, so sharing it would share trackers between arms.
-//  3. The NULL CONTROL is not optional. `--arm null` runs α=0 against α=0; if it
+//  3. A FRESH ENGINE per arm per game/seat (replayArm calls recycleEngine). The
+//     worker is otherwise respawned on a cumulative ENGINE-CALL count, which a
+//     cache hit does not increment — so the cold-cache arm and the warm-cache
+//     arm respawn at different plies, and a respawn changes the answers even
+//     with fresh hash on. Measured: 84.5% agreement before, 100.0% after.
+//  4. The NULL CONTROL is not optional. `--arm null` runs α=0 against α=0; if it
 //     does not come back ~0 ± noise, the harness is broken and every other
-//     number it printed is fiction.
+//     number it printed is fiction. It has earned this three times now: the
+//     double-commit bug, the transposition table, and note 3.
 // ---------------------------------------------------------------------------
 
 import { existsSync } from 'node:fs';
@@ -55,7 +61,7 @@ import {
   setBeliefSampleAlphaForSeat, setMovePriorForSeat, setBeliefReachWeightingForSeat,
 } from '../src/exactBelief.js';
 import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from '../src/movePrior.js';
-import { quit as stockfishQuit, setFreshHash } from '../src/stockfish.js';
+import { quit as stockfishQuit, setFreshHash, setAutoRecycle, recycleEngine } from '../src/stockfish.js';
 import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +123,20 @@ const seed0 = Number(arg('seed', '12345'));
 // corpus where half the divergence sat on positions with a single possible
 // board. `--fresh-hash 0` restores the old (fast, unsound) behaviour.
 setFreshHash(arg('fresh-hash', '1') !== '0');
+// AND FRESH HASH IS NOT ENOUGH ON ITS OWN. The engine worker is also respawned
+// every RECYCLE_AFTER *engine calls*, and a cache hit is not an engine call —
+// so the first arm (cold cache, calling constantly) and the second (warm,
+// calling rarely) cross that boundary at different plies. A respawn is not a
+// no-op even with fresh hash on: switching it off took this harness's null
+// control from 84.5% agreement and -1.46 ± 2.42 cp between two IDENTICAL
+// configurations to 100.0% and 0.00 ± 0.00 cp.
+//
+// So the boundary is declared HERE instead, where the position stream is known:
+// replayArm respawns unconditionally before every arm of every game/seat, which
+// both arms do identically by construction. `--auto-recycle 1` hands the
+// decision back to the engine's call counter (fast, unsound). With it off, heap
+// safety rides on one replay staying under the WASM abort — see setAutoRecycle.
+setAutoRecycle(arg('auto-recycle', '0') !== '0');
 // --verbose prints per-ply cost, which is how the ms/move mystery got solved.
 const VERBOSE = argv.includes('--verbose');
 const seatArg = arg('seat', 'both');
@@ -240,6 +260,13 @@ setGame(REPLAY_GAME);
  */
 async function replayArm(sess, seat, spec, seed) {
   const { alpha, prior, sfDepth, rounds, reach } = spec;
+  // Fresh ENGINE, unconditionally — protocol note 4, and the counterpart of the
+  // fresh agent and fresh players array below. Every arm of every game/seat
+  // starts the engine from the same state, so a respawn can never land at a
+  // different ply in one arm than in the other. Unconditional is the whole
+  // point: making it depend on anything (a call count, a heap reading) is how
+  // the boundary drifted between arms in the first place.
+  await recycleEngine();
   // Fresh identity → fresh belief trackers (see protocol note 2). The α is read
   // in the ExactBelief constructor, so it must be set BEFORE the first sample.
   const players = JSON.parse(JSON.stringify(sess.params.players));

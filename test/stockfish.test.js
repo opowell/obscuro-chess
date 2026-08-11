@@ -4,7 +4,7 @@ import { FogChess } from '../src/FogChess.js';
 import { ObscuroAgent } from '../src/ObscuroAgent.js';
 import { ChessAgent } from '../src/ChessAgent.js';
 import { toFEN, uciToAction } from '../src/fen.js';
-import { available, bestMove, multiPV, quit, setFreshHash } from '../src/stockfish.js';
+import { available, bestMove, multiPV, quit, setFreshHash, setAutoRecycle, recycleEngine } from '../src/stockfish.js';
 import { setOverrides, resetSettings } from '../src/config.js';
 
 after(() => quit());
@@ -131,6 +131,53 @@ test('multiPV is reproducible across intervening searches when FRESH_HASH is on'
   } finally {
     setFreshHash(null);
     resetSettings();
+  }
+});
+
+test('recycleEngine: respawns without disturbing a search in flight', async (t) => {
+  if (!(await available())) { t.skip('vendored stockfish failed to load'); return; }
+  // A harness owning the respawn boundary calls this between arms, but it has to
+  // be safe to call at any moment: it goes through the same serialising queue as
+  // a search, so an in-flight one must still come back whole. The queue is also
+  // the part that breaks quietly — store a rejected promise in it and every
+  // later search silently skips its work — so this asserts the engine still
+  // answers afterwards rather than just that the call resolved.
+  setFreshHash(true);
+  const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  const inFlight = multiPV(fen, { multipv: 5, depth: 6 });
+  const recycled = recycleEngine();                 // queued behind it
+  const lines = await inFlight;
+  await recycled;
+  assert.ok(Array.isArray(lines) && lines.length >= 2, 'the in-flight search survived');
+
+  const after = await multiPV(fen, { multipv: 5, depth: 6 });
+  assert.deepEqual(after, lines, 'the engine still answers, and identically, after a respawn');
+});
+
+test('setAutoRecycle(false) leaves the boundary to the caller', async (t) => {
+  if (!(await available())) { t.skip('vendored stockfish failed to load'); return; }
+  // With the automatic trigger off, RECYCLE_AFTER must not fire however many
+  // calls go through — that is the whole point, since a count of ENGINE calls
+  // differs between two arms whose cache hit rates differ. Set the threshold to
+  // 1 (fire on everything) and check nothing does: the engine keeps working and
+  // keeps answering the same, which a mid-loop respawn would not guarantee.
+  setFreshHash(true);
+  setAutoRecycle(false);
+  setOverrides({ chess: { RECYCLE_AFTER: 1 } });
+  try {
+    const fens = [
+      'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
+      'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3',
+    ];
+    const first = [];
+    for (const f of fens) first.push(await multiPV(f, { multipv: 4, depth: 4 }));
+    for (const f of fens) first.push(await multiPV(f, { multipv: 4, depth: 4 }));
+    for (const r of first) assert.ok(Array.isArray(r) && r.length >= 2, 'engine answered every call');
+    assert.deepEqual(first.slice(3), first.slice(0, 3), 'repeat calls agree');
+  } finally {
+    resetSettings();
+    setAutoRecycle(true);
   }
 });
 
