@@ -113,6 +113,9 @@ const knobs = {
 // magnitude — strictly more informative than the sign test, which discards it.
 // --clip 0 restores the raw mean.
 const CLIP = Number(arg('clip', '300'));
+// Read here rather than next to its writer at the bottom: grid mode dumps too,
+// and it exits long before that line would have been evaluated.
+const dumpPath = arg('dump', null);
 const clipLoss = x => (CLIP > 0 ? Math.min(x, CLIP) : x);
 const seed0 = Number(arg('seed', '12345'));
 // THE PAIRED DESIGN REQUIRES THIS. `go depth N` is not a pure function of the
@@ -373,6 +376,11 @@ if (argv.includes('--grid')) {
     return { label: `depth ${d}, ${r} rounds`, sfDepth: d, rounds: r, alpha: 0 };
   });
   const acc = configs.map(() => ({ loss: [], ms: 0, moves: 0, top: 0 }));
+  // Every config replays the SAME positions, so the comparison between two of
+  // them is paired exactly as `--arm` is — and was being thrown away. Keyed by
+  // position, one slot per config, so the report below can difference them.
+  const byPos = new Map();
+  const posKey = (g, seat, ply) => `${g}|${seat}|${ply}`;
   const tg = Date.now();
   for (let g = 0; g < games.length; g++) {
     for (const seat of seats) {
@@ -390,9 +398,19 @@ if (argv.includes('--grid')) {
           if (!ref || !key) continue;
           const s = ref.byKey.get(key);
           if (s === undefined) continue;
-          acc[c].loss.push(ref.best - s);
-          if (ref.best - s === 0) acc[c].top++;
+          // CLIPPED, as `--arm` has always been (clipLoss, --clip). Raw losses
+          // let a handful of catastrophes own the mean: on the first run of this
+          // grid the means came out non-monotone in depth (164.7 / 135.8 / 152.9
+          // / 129.6) while best-move% was cleanly monotone, which is the
+          // signature of a statistic whose mean is 4x its median.
+          const loss = clipLoss(ref.best - s);
+          acc[c].loss.push(loss);
+          if (loss === 0) acc[c].top++;
           acc[c].moves++;
+          const pk = posKey(g, seat, ply);
+          let row = byPos.get(pk);
+          if (!row) { row = new Array(configs.length).fill(null); byPos.set(pk, row); }
+          row[c] = loss;
         }
       }
       process.stdout.write(`  game ${g + 1}/${games.length} ${seat}: ${((Date.now() - tg) / 1000).toFixed(0)}s\n`);
@@ -412,6 +430,42 @@ if (argv.includes('--grid')) {
       (100 * a.top / Math.max(1, a.moves)).toFixed(1).padStart(11));
   }
   console.log('\nLower cp loss at lower ms/move is strictly better; anything else is a trade.');
+
+  // PAIRED DIFFERENCES against the first config, which is what the column of
+  // means above cannot give you: the configs share every position, so the
+  // position-to-position variance — which is enormous — cancels, exactly as it
+  // does in `--arm`. Without this the grid reports four numbers and no way to
+  // tell which gaps are real, and a reader is left eyeballing means whose
+  // standard error is nowhere on the page.
+  const rows = [...byPos.values()];
+  console.log(`\npaired vs "${configs[0].label}" over the ${rows.length} shared positions:`);
+  console.log('config'.padEnd(22) + '    n   mean Δcp ± SE      z   better%');
+  for (let c = 1; c < configs.length; c++) {
+    const d = rows.filter(r => r[0] != null && r[c] != null).map(r => r[c] - r[0]);
+    if (!d.length) continue;
+    const m = d.reduce((s, x) => s + x, 0) / d.length;
+    const varr = d.length > 1
+      ? d.reduce((s, x) => s + (x - m) * (x - m), 0) / (d.length - 1) : 0;
+    const se = Math.sqrt(varr / d.length);
+    const wins = d.filter(x => x < 0).length;         // this config lost less
+    const decisive = d.filter(x => x !== 0).length;
+    console.log(configs[c].label.padEnd(22) +
+      String(d.length).padStart(5) +
+      `${m >= 0 ? '+' : ''}${m.toFixed(2)} ± ${se.toFixed(2)}`.padStart(15) +
+      (se > 0 ? (m / se).toFixed(2) : 'n/a').padStart(7) +
+      (decisive ? (100 * wins / decisive).toFixed(1) : '—').padStart(9));
+  }
+  console.log('  negative Δcp favours the row over the baseline; better% is over decisive positions only.');
+
+  if (dumpPath) {
+    const { writeFileSync } = await import('node:fs');
+    const head = 'position,' + configs.map(c => JSON.stringify(c.label)).join(',') + '\n';
+    const body = [...byPos.entries()]
+      .map(([pk, r]) => JSON.stringify(pk) + ',' + r.map(x => x ?? '').join(',')).join('\n');
+    writeFileSync(dumpPath, head + body + '\n');
+    console.log(`\nper-position rows → ${dumpPath}`);
+  }
+
   reportLeafHealth();
   await stockfishQuit?.();
   process.exit(0);
@@ -625,7 +679,6 @@ if (withP.length >= 3) {
 // Per-position rows, so this run can be re-analysed (or pooled with another
 // arm's) without paying for the reference sweep again — which is most of the
 // wall clock.
-const dumpPath = arg('dump', null);
 if (dumpPath) {
   const { writeFileSync } = await import('node:fs');
   const head = 'arm,a_label,b_label,game,seat,ply,p_size,p_size_b,loss_a,loss_b,diff,same\n';
