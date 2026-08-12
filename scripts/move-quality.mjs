@@ -116,6 +116,25 @@ const CLIP = Number(arg('clip', '300'));
 // Read here rather than next to its writer at the bottom: grid mode dumps too,
 // and it exits long before that line would have been evaluated.
 const dumpPath = arg('dump', null);
+
+// INCREMENTAL, AND ATOMIC. These runs are hours long — the 120-game grid is
+// ~4.5 h — and the dump used to be written once, at the very end, so anything
+// that stopped the process early threw away every position it had measured.
+// That is a bad trade for a few hundred KB rewritten once per game/seat.
+//
+// Via a temp file and a rename, because the other half of the same problem is
+// being killed DURING the write and finding a half-row at the end of the file
+// next time. rename(2) is atomic on the same filesystem, so a reader sees the
+// previous complete dump or the new one, never a partial.
+const { writeFileSync, renameSync } = await import('node:fs');
+function writeDump(head, rows) {
+  if (!dumpPath) return;
+  const tmp = dumpPath + '.partial';
+  try {
+    writeFileSync(tmp, head + rows.join('\n') + '\n');
+    renameSync(tmp, dumpPath);
+  } catch { /* a dump we cannot write must not kill the measurement */ }
+}
 const clipLoss = x => (CLIP > 0 ? Math.min(x, CLIP) : x);
 const seed0 = Number(arg('seed', '12345'));
 // THE PAIRED DESIGN REQUIRES THIS. `go depth N` is not a pure function of the
@@ -381,6 +400,9 @@ if (argv.includes('--grid')) {
   // position, one slot per config, so the report below can difference them.
   const byPos = new Map();
   const posKey = (g, seat, ply) => `${g}|${seat}|${ply}`;
+  const gridDumpHead = () => 'position,' + configs.map(c => JSON.stringify(c.label)).join(',') + '\n';
+  const gridDumpRows = () => [...byPos.entries()]
+    .map(([pk, r]) => JSON.stringify(pk) + ',' + r.map(x => x ?? '').join(','));
   const tg = Date.now();
   for (let g = 0; g < games.length; g++) {
     for (const seat of seats) {
@@ -413,6 +435,9 @@ if (argv.includes('--grid')) {
           row[c] = loss;
         }
       }
+      // Flush what we have after every game/seat, so a run that is stopped —
+      // or that dies — still leaves every position it finished measuring.
+      writeDump(gridDumpHead(), gridDumpRows());
       process.stdout.write(`  game ${g + 1}/${games.length} ${seat}: ${((Date.now() - tg) / 1000).toFixed(0)}s\n`);
     }
   }
@@ -458,11 +483,7 @@ if (argv.includes('--grid')) {
   console.log('  negative Δcp favours the row over the baseline; better% is over decisive positions only.');
 
   if (dumpPath) {
-    const { writeFileSync } = await import('node:fs');
-    const head = 'position,' + configs.map(c => JSON.stringify(c.label)).join(',') + '\n';
-    const body = [...byPos.entries()]
-      .map(([pk, r]) => JSON.stringify(pk) + ',' + r.map(x => x ?? '').join(',')).join('\n');
-    writeFileSync(dumpPath, head + body + '\n');
+    writeDump(gridDumpHead(), gridDumpRows());
     console.log(`\nper-position rows → ${dumpPath}`);
   }
 
@@ -474,6 +495,11 @@ if (argv.includes('--grid')) {
 // --- run ---------------------------------------------------------------------
 
 const stats = { a: [], b: [], diffs: [], aTop: 0, bTop: 0, n: 0, same: 0, rows: [], pMismatch: 0 };
+const armDumpHead = () => 'arm,a_label,b_label,game,seat,ply,p_size,p_size_b,loss_a,loss_b,diff,same\n';
+const armDumpRows = () => stats.rows.map(r => [
+  armName, JSON.stringify(arm.a.label), JSON.stringify(arm.b.label), JSON.stringify(r.game), r.seat, r.ply,
+  r.pSize ?? '', r.pSizeB ?? '', r.la, r.lb, r.diff, r.same ? 1 : 0,
+].join(','));
 const blankHealth = () => ({ engineLeaves: 0, fallbackLeaves: 0, pvNullNodes: 0, pvShortNodes: 0, unmappedNodes: 0, refusedNodes: 0 });
 const healthA = blankHealth(), healthB = blankHealth();
 const accStats = (into, st) => { for (const k of Object.keys(into)) into[k] += st[k] ?? 0; };
@@ -519,6 +545,7 @@ for (let g = 0; g < games.length; g++) {
       if (pa != null && b.pSize != null && pa !== b.pSize) stats.pMismatch++;
       stats.rows.push({ game: file, seat, ply, pSize: pa, pSizeB: b.pSize, la, lb, diff: la - lb, same: ka === kb });
     }
+    writeDump(armDumpHead(), armDumpRows());   // see writeDump: hours-long runs
     process.stdout.write(`  ${file.slice(0, 8)} ${seat}: ${stats.n} positions, ${((Date.now() - t0) / 1000).toFixed(0)}s\n`);
   }
 }
@@ -680,13 +707,7 @@ if (withP.length >= 3) {
 // arm's) without paying for the reference sweep again — which is most of the
 // wall clock.
 if (dumpPath) {
-  const { writeFileSync } = await import('node:fs');
-  const head = 'arm,a_label,b_label,game,seat,ply,p_size,p_size_b,loss_a,loss_b,diff,same\n';
-  const body = stats.rows.map(r => [
-    armName, JSON.stringify(arm.a.label), JSON.stringify(arm.b.label), JSON.stringify(r.game), r.seat, r.ply,
-    r.pSize ?? '', r.pSizeB ?? '', r.la, r.lb, r.diff, r.same ? 1 : 0,
-  ].join(',')).join('\n');
-  writeFileSync(dumpPath, head + body + '\n');
+  writeDump(armDumpHead(), armDumpRows());
   console.log(`\nper-position rows → ${dumpPath}`);
 }
 
