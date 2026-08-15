@@ -235,8 +235,7 @@ console.log(describeCorpus(games, corpusStats));
 // fallback leaves is a run where Stockfish timed out and the static evaluator
 // stood in — its numbers are not comparable with a clean run's. See
 // ObscuroAgent.getLeafEvalStats.
-function reportLeafHealth() {
-  const st = getLeafEvalStats();
+function reportLeafHealth(st = getLeafEvalStats()) {
   const total = st.engineLeaves + st.fallbackLeaves;
   const pct = total ? (100 * st.fallbackLeaves / total) : 0;
   console.log(`leaf evaluations: ${total} (${st.calls} engine calls), ` +
@@ -246,8 +245,20 @@ function reportLeafHealth() {
     `fewer-lines-than-asked ${st.pvShortNodes}, lines-but-not-our-moves ${st.unmappedNodes}` +
     (st.engineUnavailable ? `, engine-unavailable ${st.engineUnavailable}` : ''));
   if (pct > 0.5) {
-    console.log('  ^ MEASUREMENT DEGRADED. Stockfish was timing out — almost always because');
-    console.log('    something else heavy was running on this machine. Re-run it alone.');
+    // Name the cause the counters actually identify, rather than blaming load
+    // unconditionally: `engine-said-nothing` is the engine not answering at all
+    // (dead worker, unloadable binary, timeouts), while `lines-but-not-our-moves`
+    // is a MultiPV mapping problem that has nothing to do with how busy the
+    // machine is, and telling a reader to "re-run it alone" for that wastes
+    // hours on the wrong fix.
+    const cause = st.pvNullNodes > st.unmappedNodes + st.pvShortNodes
+      ? 'Stockfish answered NOTHING on ' + st.pvNullNodes + ' nodes — a dead or unloadable\n' +
+        '    engine, or timeouts. Check the engine binary is still on disk and that nothing\n' +
+        '    else heavy is running.'
+      : 'the engine answered, but not about our moves (' + st.unmappedNodes + ' nodes\n' +
+        '    unmapped, ' + st.pvShortNodes + ' short). That is a MultiPV width/mapping issue,\n' +
+        '    not machine load.';
+    console.log('  ^ MEASUREMENT DEGRADED. ' + cause);
   }
 }
 
@@ -403,6 +414,15 @@ if (argv.includes('--grid')) {
   const gridDumpHead = () => 'position,' + configs.map(c => JSON.stringify(c.label)).join(',') + '\n';
   const gridDumpRows = () => [...byPos.entries()]
     .map(([pk, r]) => JSON.stringify(pk) + ',' + r.map(x => x ?? '').join(','));
+  // ACCUMULATED ACROSS THE WHOLE RUN, because the per-game reset below means the
+  // final report otherwise describes only the LAST game/seat. A 120-game grid
+  // ran for two hours with a dead engine and every number after game ~51
+  // produced by the static evaluator; the summary could only say so because the
+  // engine happened to still be dead at the end. Had it recovered, the run would
+  // have reported itself healthy while most of it was worthless.
+  const health = { calls: 0, engineLeaves: 0, fallbackLeaves: 0, truncated: 0, refusedNodes: 0,
+    pvNullNodes: 0, pvShortNodes: 0, unmappedNodes: 0, engineUnavailable: 0 };
+  const addHealth = (st) => { for (const k of Object.keys(health)) health[k] += st[k] ?? 0; };
   const tg = Date.now();
   for (let g = 0; g < games.length; g++) {
     for (const seat of seats) {
@@ -438,6 +458,23 @@ if (argv.includes('--grid')) {
       // Flush what we have after every game/seat, so a run that is stopped —
       // or that dies — still leaves every position it finished measuring.
       writeDump(gridDumpHead(), gridDumpRows());
+      // FAIL FAST ON A DEAD ENGINE. Everything past this point would be the
+      // static evaluator wearing the configs' names, and the configs would come
+      // out near-identical BECAUSE none of them was using its leaf depth — a
+      // result that looks like a finding. Two hours of that is worse than
+      // stopping, and stopping still leaves the dump of what was real.
+      const st = getLeafEvalStats();
+      addHealth(st);
+      const seen = st.engineLeaves + st.fallbackLeaves;
+      if (seen > 0 && st.engineLeaves === 0) {
+        console.error(`\nSTOPPING at game ${g + 1}/${games.length} ${seat}: the engine answered ` +
+          `nothing on all ${st.calls} calls this game — every leaf fell back to the static ` +
+          `evaluator.\nEverything measured so far is in the dump; nothing after this point ` +
+          `would have been.`);
+        reportLeafHealth(health);
+        await stockfishQuit?.();
+        process.exit(1);
+      }
       process.stdout.write(`  game ${g + 1}/${games.length} ${seat}: ${((Date.now() - tg) / 1000).toFixed(0)}s\n`);
     }
   }
@@ -487,7 +524,7 @@ if (argv.includes('--grid')) {
     console.log(`\nper-position rows → ${dumpPath}`);
   }
 
-  reportLeafHealth();
+  reportLeafHealth(health);   // the whole run, not just the last game/seat
   await stockfishQuit?.();
   process.exit(0);
 }
