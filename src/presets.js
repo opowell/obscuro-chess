@@ -111,9 +111,16 @@ const ZHANG_SANDHOLM_DESIGN = {
     // possible states" (FogChess.sampleWorlds); "Uniform 1/N says every world in
     // my information set is equally likely — which is what the paper assumes,
     // because it samples uniformly and has no better model" (vendor/obscuro
-    // search.js, root-world reach). α = 0 and β = 0 are already the shipped
-    // defaults — for their own measured reasons, quoted in exactBelief.js — so
-    // this pins an agreement rather than changing anything.
+    // search.js, root-world reach).
+    //
+    // α = 0 IS THE PAPER, AND IS NO LONGER THE SHIPPED DEFAULT. Since 2026-08-16
+    // the engine ships α = 1 — worlds drawn ∝ the posterior — on a holdout-
+    // confirmed −2.28 ± 0.41 cp (exactBelief.js). The paper cannot do that: α
+    // needs an opponent model to weight WITH, and π is this repo's addition, the
+    // same addition MOVE_PRIOR_UNIFORM below turns off. So this line now pins a
+    // deliberate DIFFERENCE from the default rather than an agreement, and it is
+    // load-bearing: drop it and `--preset paper` silently stops being the paper.
+    // β = 0 remains both the paper's and the shipped default.
     SAMPLE_ALPHA_DEFAULT: 0,
     REACH_WEIGHTING_DEFAULT: 0,
 

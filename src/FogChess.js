@@ -37,7 +37,7 @@ import { isKingInCheck, getVisibleSquares } from './board.js';
 import { getAllLegalMoves, getAllFogMoves } from './moves.js';
 import { evaluate } from './ChessAgent.js';
 import { getBelief, impossiblePlacement } from './belief.js';
-import { getExactBelief, getBeliefReachWeighting } from './exactBelief.js';
+import { getExactBelief, getBeliefReachWeighting, getBeliefSampleAlpha } from './exactBelief.js';
 import { DEFAULT_DIFFICULTY } from './stockfish.js';
 import { param } from './config.js';
 
@@ -381,14 +381,19 @@ export const FogChess = {
       //
       // The correction is importance sampling. Drawing ∝ wᵅ and weighting by
       // w¹⁻ᵅ estimates the w-weighted mean for any α, which keeps both ends
-      // honest: at α=1 the weight is already in the draw (uniform reach, the old
-      // behaviour), and at the shipped α=0 the draw is uniform and the reach
-      // carries the whole posterior.
+      // honest: at the shipped α=1 the weight is already in the draw (uniform
+      // reach), and at α=0 the draw is uniform and the reach carries the whole
+      // posterior.
       const idx = exact.sampleIndices(n, rng);
       const picks = idx && exact.positionsAt(idx);
       if (picks && picks.length) {
         const source = exact.approx ? 'exact(reacquired)' : 'exact';
-        const alpha = exact.sampleAlpha ?? 0;
+        // Fall back to the CONFIGURED α, not to a literal. A tracker always sets
+        // `_alpha` at construction so this should never fire, but the literal 0
+        // that used to be here silently meant "paper behaviour" the moment the
+        // default stopped being 0 — a stale fallback that agrees with the default
+        // is invisible until the default moves.
+        const alpha = exact.sampleAlpha ?? getBeliefSampleAlpha();
         const beta = getBeliefReachWeighting(playerId);
         return validate(picks.map(pos => ({
           ...observation,

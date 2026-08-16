@@ -225,6 +225,46 @@ function priorFor(state, aiColor) {
 // (FRESH_HASH — see stockfish.js) and the null control verified at 100.0%
 // identical / 0.00 cp: **+0.21 ± 1.08 cp (z = 0.20), sign test 48.8%**. Flat.
 //
+// 2026-08-16: THAT WAS UNDERPOWERED, AND α = 1 WINS. The run above is not wrong
+// so much as unable to see the effect at its own settings: it ran at the default
+// CAP = 200,000 / TIME_GUARD_MS = 4,000, which abandons exactness — stickily, for
+// the rest of the game — on the high-|P| turns where α does all of its work.
+//
+// Remeasured at CAP = 2e6 / guard = 180 s, on the crawl games π was NOT fitted to
+// (173 of the fitting set were in the crawl and were removed first), 300 games
+// discovery + 300 fresh HOLDOUT games, ~15.4k paired positions each. The |P| cut
+// points below were registered on the discovery half BEFORE the holdout ran:
+//
+//                                discovery            HOLDOUT
+//   all exact positions      −1.81 ± 0.57 z=−3.16   −2.78 ± 0.59 z=−4.70
+//   |P| ≤ 20   (α ~inert)    −0.27 ± 0.75           +0.93 ± 0.77   ← predicted ~0
+//   |P| ≥ 1e3                −2.84 ± 0.94           −4.20 ± 0.90 z=−4.65
+//
+// Pooled: −2.28 ± 0.41 cp overall, −3.55 ± 0.65 where |P| ≥ 1e3. The holdout
+// contrast is z = −4.31, and the same-move rate falls 78% → 35% between those
+// bands, so α is changing the move precisely where there is belief to weight.
+//
+// WHY THE EARLIER NULL: replaying this holdout with the old CAP applied stickily
+// censors 29% of its exact positions and drags the estimate from −2.78 to
+// −1.64 ± 0.63. Against an SE of 1.08 that is 1.5σ of power, so +0.21 is an
+// ordinary fluctuation rather than a contradiction — the two runs differ by
+// z = 1.48 once the censoring is matched. A null at low power is not a flat line.
+//
+// The dilution defence quoted above is also NOT what is happening here, and the
+// distinction matters: this effect survives dropping the top 25% of |P|
+// (−1.91 ± 0.63, z = −3.03) and its outlier-immune sign test is STRONGER than
+// its mean test (53.1%, z = 4.79; 54.1% at |P| ≥ 1e3). It is not carried by a
+// tail. The old log10|P| regression missed it because the effect is a threshold,
+// not a slope — that fit is still only t = −1.67 on the very data above.
+//
+// Caveat that no amount of n removes: cp-loss is scored against a Stockfish
+// depth-12 search of the TRUE board, which cannot see information value. A
+// scouting move that is right under fog scores badly, and α is exactly the knob
+// that should move such choices. This says α = 1 plays more accurately by that
+// referee, not that it plays better fog chess. The self-play 4–11 above is the
+// only measurement of the latter and is far too small to weigh against it; a
+// properly powered strength-belief run remains the outstanding work.
+//
 // Two earlier move-quality numbers for α are VOID and should not be quoted, in
 // either direction — "+2.96 ± 2.62 in favour of α=0" (the harness killed exact P
 // on ply 2, so α was not varied at all) and "−0.86 ± 1.66, a mild lean toward
@@ -242,7 +282,11 @@ function priorFor(state, aiColor) {
 // they were dropped. The sibling |P| story for reach weighting was pre-registered
 // on a holdout and refuted outright (see setBeliefReachWeighting). Uncertainty is
 // not the hidden variable in either knob.
-export const SAMPLE_ALPHA_DEFAULT = 0;
+// 1 = draw worlds ∝ the posterior. NOT the paper's behaviour — Zhang & Sandholm
+// sample uniformly because they have no opponent model to weight with; α is only
+// available here because of the fitted π. `--preset paper` pins it back to 0 for
+// exactly that reason (presets.js).
+export const SAMPLE_ALPHA_DEFAULT = 1;
 // null = nobody called the setter, so follow the settings layer (which itself
 // falls back to the constant above). Keeping "unset" distinct from "set to the
 // default value" is what lets a settings file supply the starting α while

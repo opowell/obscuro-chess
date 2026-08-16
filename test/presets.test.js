@@ -12,12 +12,12 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { param, resetSettings, validate, settingsTree } from '../src/config.js';
+import { param, resetSettings, validate, settingsTree, setOverrides } from '../src/config.js';
 import { PRESETS, preset, presetNames, loadPreset, formatPresets } from '../src/presets.js';
 import { applyCliSettings } from '../src/cli.js';
 import { FogChess } from '../src/FogChess.js';
 import { ChessObscuroAgent, SEARCH_WIN, LEAF_CLAMP, MAX_SF_DEPTH } from '../src/ObscuroAgent.js';
-import { getDefaultMovePrior } from '../src/exactBelief.js';
+import { getDefaultMovePrior, getBeliefSampleAlpha, setBeliefSampleAlpha } from '../src/exactBelief.js';
 import {
   UNIFORM_PRIOR, UNIFORM_ONLY, FITTED_WEIGHTS, weightsForRating,
   RATING_PIVOT, RATING_SCALE, RATING_Z_CLAMP,
@@ -109,6 +109,37 @@ test('the paper preset serves no opponent model', () => {
   assert.equal(getDefaultMovePrior(), UNIFORM_PRIOR);
   resetSettings();
   assert.notEqual(getDefaultMovePrior(), UNIFORM_PRIOR, 'and it comes back');
+});
+
+test('the paper preset pins α=0 against a shipped default of 1', () => {
+  // α is the one place where the shipped engine deliberately DIVERGES from the
+  // paper: since 2026-08-16 it draws worlds ∝ the posterior (−2.28 ± 0.41 cp,
+  // holdout-confirmed — exactBelief.js), which the paper cannot do because it has
+  // no opponent model to weight with. So `--preset paper` has to put α back to 0,
+  // and that line is load-bearing rather than decorative: if the preset ever
+  // stopped setting it, `--preset paper` would silently stop being the paper.
+  // This test is what makes deleting it fail loudly.
+  assert.equal(getBeliefSampleAlpha(), 1, 'the engine ships posterior-weighted draws');
+  loadPreset('paper');
+  assert.equal(getBeliefSampleAlpha(), 0, 'the paper samples uniformly over P');
+  resetSettings();
+  assert.equal(getBeliefSampleAlpha(), 1, 'and the default comes back');
+});
+
+test('α is overridable at every layer, over the new default', () => {
+  // A default is only a default: a settings file, --set, and the programmatic
+  // setter must each still win, and the explicit setter must outrank the
+  // settings layer (that is the whole reason `sampleAlpha` keeps "unset"
+  // distinct from "set to the default value").
+  assert.equal(getBeliefSampleAlpha(), 1);
+  setOverrides({ chess: { SAMPLE_ALPHA_DEFAULT: 0.5 } });
+  assert.equal(getBeliefSampleAlpha(), 0.5, 'a settings layer beats the constant');
+  setBeliefSampleAlpha(0);
+  assert.equal(getBeliefSampleAlpha(), 0, 'an explicit setter beats the settings layer');
+  setBeliefSampleAlpha(undefined);            // back to "nobody asked"
+  assert.equal(getBeliefSampleAlpha(), 0.5, 'clearing it defers to settings again');
+  resetSettings();
+  assert.equal(getBeliefSampleAlpha(), 1);
 });
 
 test('the design preset changes no search budget, so it is measurable', () => {

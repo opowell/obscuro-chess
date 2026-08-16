@@ -141,9 +141,9 @@ test('exact belief: commitOurMove keeps the weights a distribution', () => {
 
 test('exact belief: the sampling exponent α switches weighted vs uniform draws', () => {
   // Both modes of `sampleAlpha`, set explicitly rather than inherited: production
-  // ships α=0 (uniform — weighted sampling measured worse in play, see exactBelief.js)
-  // but the weighted path must keep working, since the whole reason α is a knob is
-  // that a higher-powered strength measurement could turn it back on.
+  // ships α=1 (draw ∝ the posterior, on the holdout-confirmed measurement in
+  // exactBelief.js) but the uniform path must keep working, because it is what
+  // `--preset paper` selects to reproduce Zhang & Sandholm.
   const b = new ExactBelief('white');
   b._alpha = 1;
   b.exact = true;
@@ -279,7 +279,18 @@ test('exact belief: sampled worlds carry an importance weight for the search rea
   // `cfrDescend(w.node, me, 1, w.prob)`), and until 2026-08-02 that reach was a
   // flat 1/N — so the belief was computed and then discarded before it could
   // affect a move. This pins the channel open.
-  const { setBeliefReachWeightingForSeat } = await import('../src/exactBelief.js');
+  const { setBeliefReachWeightingForSeat, setBeliefSampleAlphaForSeat } =
+    await import('../src/exactBelief.js');
+  // α BEFORE THE FIRST SAMPLE, because ExactBelief captures it in its constructor
+  // (`_alpha = alphaBySeat.get(color) ?? getBeliefSampleAlpha()`) — setting it
+  // after a tracker exists does nothing at all, which is the same trap
+  // move-quality's replayArm documents as protocol note 2. β is read live, so it
+  // can still be flipped mid-test below; α cannot.
+  //
+  // It has to be 0 here: the importance weight is `w^(β(1−α))`, so at the shipped
+  // α=1 the exponent is zero and no weight is attached — once worlds are drawn ∝
+  // the posterior, weighting the reach by it again would count it twice.
+  setBeliefSampleAlphaForSeat('white', 0);
   let state = FogChess.createInitialState(
     [{ id: 'white', name: 'W' }, { id: 'black', name: 'B' }],
     { fogOfWar: true, fog: true });
@@ -297,6 +308,7 @@ test('exact belief: sampled worlds carry an importance weight for the search rea
   // Enabled explicitly: the DEFAULT is off (measured — see REACH_WEIGHTING_DEFAULT),
   // so this pins that the channel still works when switched on, which is what any
   // future re-measurement depends on.
+  //
   setBeliefReachWeightingForSeat('white', true);
   const view = FogChess.getVisibleState(state, 'white');
   const worlds = FogChess.sampleWorlds(view, 'white', 8, Math.random);
@@ -317,6 +329,13 @@ test('exact belief: sampled worlds carry an importance weight for the search rea
   for (const w of flat) {
     assert.equal(w.beliefWeight, undefined, 'reach weighting off ⇒ no weight on the world');
   }
+
+  // The OTHER way this channel closes is α itself: at the shipped α=1 the
+  // exponent β(1−α) is zero, so β is inert no matter what it is set to. That
+  // cannot be asserted here — this tracker captured α=0 at construction and
+  // there is no way to change it afterwards — so it is pinned in presets.test.js
+  // against the default instead.
+  setBeliefSampleAlphaForSeat('white', null);   // don't leak α=0 into later tests
 });
 
 test('belief: a contradicted piece falls back to TYPE-LEGAL squares only', async () => {

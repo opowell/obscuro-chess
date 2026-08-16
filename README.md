@@ -218,11 +218,12 @@ search draws. Both switches that would let it are zero:
 
 | | ships at | meaning |
 |---|---|---|
-| `SAMPLE_ALPHA_DEFAULT` | 0 | worlds are drawn **uniformly** over P, ignoring π's weights |
+| `SAMPLE_ALPHA_DEFAULT` | **1** | worlds are drawn **∝ the posterior** (since 2026-08-16 — see below) |
 | `REACH_WEIGHTING_DEFAULT` | 0 | each drawn world gets flat 1/N reach, not its importance weight |
 
-So refitting π sharpens the belief that `calibrate` measures and the analysis
-panel displays, and leaves the played move untouched.
+So refitting π now reaches the played move through α, as well as sharpening the
+belief that `calibrate` measures and the analysis panel displays. β = 0 still
+blocks the other channel.
 
 **Turning α on is unresolved, not settled.** It used to be "measured twice and
 lost both times", quoting **+2.96 ± 2.62 cp in favour of α=0** from
@@ -242,6 +243,36 @@ Neither reaches 2σ, so both defaults stay where they are — but the evidence t
 justified α=0 now points the other way, and the seat-swapped self-play result
 (4–11 for α=0, unaffected by the bug since it plays what it picks) disagrees with
 it. That is the honest state.
+
+**2026-08-16: α is now resolved, and α=1 ships.** The table above, and the flat
+`+0.21 ± 1.08` that followed it, were both taken at the default `CAP = 200,000` /
+`TIME_GUARD_MS = 4,000` — which abandons exactness, stickily for the rest of the
+game, on precisely the high-|P| turns where α does its work. Remeasured at
+`CAP = 2e6` / 180 s on the crawl games π was *not* fitted to, 300 discovery + 300
+**holdout** games with the |P| cut points registered before the holdout ran:
+
+| subset | discovery | holdout |
+|---|---|---|
+| all exact positions | −1.81 ± 0.57 | **−2.78 ± 0.59** (z = −4.70) |
+| \|P\| ≤ 20 — predicted ≈ 0 | −0.27 ± 0.75 | +0.93 ± 0.77 |
+| \|P\| ≥ 10³ | −2.84 ± 0.94 | **−4.20 ± 0.90** (z = −4.65) |
+
+Pooled: **−2.28 ± 0.41 cp**, and −3.55 ± 0.65 where |P| ≥ 10³. Replaying the
+holdout under the old cap reproduces the earlier null (−2.78 → −1.64 ± 0.63,
+1.5σ of power against SE 1.08), so the runs differ by z = 1.48 once censoring is
+matched — an underpowered null, not a contradiction. Unlike the dilution story
+below, this one is not a tail artefact: it survives dropping the top 25% of |P|
+(−1.91 ± 0.63) and its sign test is stronger than its mean test.
+
+**α=1 is a departure from the paper, not a reproduction of it.** Zhang &
+Sandholm sample uniformly because they have no opponent model to weight with;
+α exists here only because of the fitted π. `--preset paper` therefore pins
+α = 0 explicitly, and that line is load-bearing.
+
+The caveat that no sample size removes: cp-loss is scored against a depth-12
+search of the *true* board, which is blind to information value. This says α=1
+plays more accurately by that referee — not yet that it plays better fog chess.
+A properly powered `strength-belief` run is the outstanding work.
 
 **And it is not a dilution artefact.** The obvious explanation — a belief knob can
 only pay where something is hidden, and the average is swamped by turns where

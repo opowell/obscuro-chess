@@ -50,7 +50,9 @@ export {
 
 // src/exactBelief.js — the exact position-set tracker P (the paper's
 // belief). SAMPLE_ALPHA_DEFAULT is the posterior-sampling sharpness (ships at
-// 0 = uniform-over-P; see the long comment on setBeliefSampleAlpha for why).
+// 1 = draw ∝ the posterior, since 2026-08-16; 0 = uniform-over-P is the paper's
+// behaviour and what `--preset paper` pins. See the long comment on
+// setBeliefSampleAlpha for the measurement).
 export {
   CAP as EXACT_BELIEF_CAP,
   TIME_GUARD_MS as EXACT_BELIEF_TIME_GUARD_MS,
