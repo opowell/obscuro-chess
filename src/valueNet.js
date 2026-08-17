@@ -54,12 +54,40 @@
 // Screen a candidate with scripts/eval-valuenet.mjs in seconds before spending an
 // hour on --grid; 20% top-1 was never going to survive contact.
 //
-// WHAT WOULD ACTUALLY BE NEEDED: king-relative features (NNUE's real trick,
-// HalfKP-style, ~40k inputs rather than 768), an optimiser that does not diverge
-// at width (momentum/Adam), and data measured in the hundreds of millions rather
-// than 2M. Or a different target entirely — training on GAME OUTCOMES instead of
-// search scores, which is the one version that could also fix the blind spot
-// this whole path inherits.
+// v2 ADDED THE KING-BUCKETED BLOCK BELOW, AND IT CHANGED NOTHING. On the same
+// holdout: top-1 21.2% (was 20.6%), regret 23.3 (was 23.7), Spearman 0.327 (was
+// 0.324) — a wash, with validation RMSE slightly WORSE (191.7 vs 179.9) from the
+// extra parameters. Hidden 64 on the new features was worse again. The block is
+// kept because the finding is "king conditioning does not help AT 2M SAMPLES",
+// not "king conditioning is useless" — it is what a future attempt with real data
+// volume would build on, and re-deriving it costs more than carrying it.
+//
+// WHAT THE GAP ACTUALLY IS, measured rather than guessed. Scoring Stockfish
+// DEPTH 1 against depth 7 on the identical 3,026 holdout nodes:
+//
+//                          top-1    regret    spearman
+//     depth 1 (a search)   38.2%     5.8 cp     0.641
+//     this net (v2)        21.2%    23.3 cp     0.327
+//     material only        21.2%    56.0 cp    -0.020
+//
+// So the ceiling was never ~20%: one ply of real search reaches 38% and 5.8 cp,
+// and the net sits at about half its rank correlation and four times its regret.
+// The task is learnable; this net is weak. And the reason is not architecture —
+// two independent attempts at that (capacity, then king-relative features) moved
+// nothing. "Depth 1" IS Stockfish's own NNUE, trained on BILLIONS of positions,
+// plus a ply. This is a from-scratch evaluator trained on 2.02M samples. The
+// deficiency is DATA VOLUME, by about three orders of magnitude.
+//
+// Which puts this squarely behind the same wall as everything else here: the
+// engine generates ~1.5M labelled children per measurement run, so 10^9 samples
+// is ~700 runs, and a run is hours. Distillation is not blocked on cleverness.
+//
+// The remaining escape is a different TARGET rather than a bigger net — game
+// outcomes instead of search scores, which is also the only version that could
+// fix the information-value blindness inherited from the teacher. That is data-
+// starved too (a corpus game yields ~55 correlated positions but ONE independent
+// label, so ~2,648 games is ~2,648 effective samples), so it needs self-play
+// volume this engine cannot produce in JS. Both roads end at throughput.
 // ---------------------------------------------------------------------------
 //
 // WHAT IT CANNOT LEARN, said here so nobody rediscovers it as a bug: it is
@@ -74,7 +102,34 @@
 
 const PIECES = ['pawn', 'knight', 'bishop', 'rook', 'queen', 'king'];
 const PIECE_INDEX = new Map(PIECES.map((p, i) => [p, i]));
-export const INPUTS = 768;
+
+// TWO BLOCKS, and the second one is the whole point of v2.
+//
+//   [0, 768)     absolute (piece, square) — what v1 had, and all it had.
+//   [768, 6912)  KING-BUCKETED (own king region, piece, square).
+//
+// v1 could not express "this bishop is fine unless my king is on the short side",
+// because it had no way to condition on where the king was — every piece-square
+// weight was a single number averaged over all king positions. That is the gap
+// NNUE closes with HalfKP, and closing it is what took v1's 20.6% top-1 as far
+// as it was going to go.
+//
+// NOT literal HalfKP (king square × piece × square = 40,960 inputs): 40,960 × 32
+// is 1.3M parameters against 2.02M samples, which is not a training problem so
+// much as a memorisation one. Bucketing the king into 8 regions — half the board
+// vertically, file pairs horizontally — keeps the conditioning while costing
+// 6,144 inputs, ~10 samples per parameter instead of ~1.5.
+//
+// COST IS UNCHANGED IN THE WAY THAT MATTERS: a board still lights up ~32 squares,
+// now contributing two indices each rather than one, so the first layer is 64
+// column adds instead of 32. Still a sum, still no matrix multiply, still ~90k
+// evaluations a move.
+const ABS_BLOCK = 768;
+const KING_BUCKETS = 8;
+export const INPUTS = ABS_BLOCK + KING_BUCKETS * 768;   // 6912
+
+/** King square → one of 8 regions: bottom/top half × file pair. */
+function kingBucket(idx) { return (idx >= 32 ? 4 : 0) + (((idx & 7) >> 1) & 3); }
 
 /** Square name ('e4') → 0..63, a1 = 0. Returns -1 for anything unparseable. */
 function squareIndex(sq) {
@@ -96,6 +151,27 @@ function squareIndex(sq) {
 export function features(board, side, out = []) {
   out.length = 0;
   const flip = side === 'b' || side === 'black';
+  const myColour = flip ? 'black' : 'white';
+
+  // Two passes, because the king bucket has to be known before any piece can be
+  // filed under it. Cheap: the first pass only looks for one square.
+  let kingIdx = -1;
+  for (const sq of Object.keys(board)) {
+    const p = board[sq];
+    if (!p || p.alive === false || p.type !== 'king') continue;
+    if ((p.ownerId ?? p.color) !== myColour) continue;
+    let idx = squareIndex(p.position ?? sq);
+    if (idx < 0) continue;
+    if (flip) idx = (7 - (idx >> 3)) * 8 + (idx & 7);
+    kingIdx = idx;
+    break;
+  }
+  // Under fog a belief world can have no king of ours at all (it was captured,
+  // which is a loss the search prices separately). No king ⇒ no bucket, and the
+  // absolute block still carries the position rather than the whole board going
+  // dark.
+  const bucketBase = kingIdx < 0 ? -1 : ABS_BLOCK + kingBucket(kingIdx) * 768;
+
   for (const sq of Object.keys(board)) {
     const p = board[sq];
     if (!p || p.alive === false) continue;
@@ -103,9 +179,11 @@ export function features(board, side, out = []) {
     if (kind === undefined) continue;
     let idx = squareIndex(p.position ?? sq);
     if (idx < 0) continue;
-    let mine = (p.ownerId ?? p.color) === (flip ? 'black' : 'white');
+    const mine = (p.ownerId ?? p.color) === myColour;
     if (flip) idx = (7 - (idx >> 3)) * 8 + (idx & 7);   // mirror ranks
-    out.push((mine ? 0 : 6) * 64 + kind * 64 + idx);
+    const rel = (mine ? 0 : 6) * 64 + kind * 64 + idx;
+    out.push(rel);
+    if (bucketBase >= 0) out.push(bucketBase + rel);
   }
   return out;
 }
@@ -158,6 +236,16 @@ export class ValueNet {
 
   static fromJSON(o) {
     const n = new ValueNet(o.hidden, o.scale ?? 300);
+    // REFUSE A NET SAVED AGAINST A DIFFERENT FEATURE LAYOUT. Float32Array.set()
+    // happily copies a short array into the front of a long one, so a v1 net
+    // (768 inputs) loaded after the king-bucket block was added would produce a
+    // silently wrong evaluator that still runs, still returns plausible
+    // centipawns, and is garbage. Fail loudly instead.
+    if (o.w1.length !== INPUTS * o.hidden) {
+      throw new Error(`valueNet: this file has ${o.w1.length / o.hidden} inputs, ` +
+        `the current feature layout has ${INPUTS}. Retrain it — a net is only ` +
+        `valid against the features() that produced it.`);
+    }
     n.w1.set(o.w1); n.b1.set(o.b1); n.w2.set(o.w2); n.b2 = o.b2;
     return n;
   }
