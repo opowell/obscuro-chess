@@ -15,38 +15,27 @@ Phase 3 reuses).
 key to improving strength? Converting belief accuracy into strength is the open
 problem, and a bigger corpus is not on its own the answer."* This doc is the
 answer to "what do we do about that" — a prioritized, independently-measurable
-roadmap, written after auditing every existing planning doc, the settled/void
-measurements in `docs/PARAMETERS.md`, and (this mattered) the actual tip of
-`origin/main`, which turned out to be three commits ahead of the checkout this
-audit started from.
+roadmap, written after auditing every existing planning doc and the settled/
+void measurements in `docs/PARAMETERS.md`.
 
-## Status: a stale checkout almost hid the biggest recent result
+## Status
 
-Anyone picking this up should `git fetch && git log HEAD..origin/main` before
-trusting a local checkout's read of "what's shipped" — a detached, 3-commits-
-stale `HEAD` here looked complete (every doc and test present) but was actually
-missing:
+Two things landed recently that change what's actually open:
 
-- **`258a3c8` — `sampleAlpha` now ships at 1.** Belief worlds are drawn
+- **`sampleAlpha` now ships at 1** (`258a3c8`). Belief worlds are drawn
   proportional to the posterior instead of uniformly over `P`. This is real
   progress on the open question above, not just another null result — see
   Phase 1–2 below for what it actually settles and what it doesn't.
-- **`3743d0e` / `c7ecbbb` — leaf-net distillation, tried twice, closed.** A
-  768→32→1 net (v1) and a king-bucketed-feature net (v2) both fail to close a
-  ~1000× data gap between this project's ~2M labelled positions and what a
-  from-scratch NNUE-scale evaluator needs. See Phase 4 — do not reopen without
-  a much larger data source.
-- A stale code comment on `_leafEval` that used to justify capping leaf-search
-  depth at 4 ("depth 7 is dominated") has been corrected in `3743d0e` — the
-  repaired measurement instrument says the opposite. **The comment is fixed;
-  the actual dial constant is not** — see Phase 1, item 1.
+- **Leaf-net distillation was tried twice and is closed** (`3743d0e`,
+  `c7ecbbb`). A 768→32→1 net (v1) and a king-bucketed-feature net (v2) both
+  fail to close a ~1000× data gap between this project's ~2M labelled
+  positions and what a from-scratch NNUE-scale evaluator needs. See Phase 4 —
+  do not reopen without a much larger data source.
 
-## Phase 0 — orient any new work at the real tip
-
-Branch a worktree from `origin/main` (`c7ecbbb` or later), not from a stale
-local ref. Every item below assumes `origin/main`'s current state, described
-accurately above; a checkout behind it will look like these are still open
-questions when some of them just got answered.
+One loose end from that work: fixing the leaf-net comment also corrected a
+stale claim on `_leafEval` that used to justify capping leaf-search depth at 4
+("depth 7 is dominated"). The comment is fixed; the actual dial constant is
+not — that's Phase 1, item 1 below.
 
 ## Phase 1 — ship what's already measured but not deployed
 
