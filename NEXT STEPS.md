@@ -1,1 +1,1 @@
-What is the key to improving strength? Converting belief accuracy into strength is the open problem, and a bigger corpus is not on its own the answer.
+What is the key to improving strength? Converting belief accuracy into strength is the open problem, and a bigger corpus is not on its own the answer. See [docs/STRENGTH-PLAN.md](docs/STRENGTH-PLAN.md) for the prioritized roadmap.
