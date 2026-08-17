@@ -292,7 +292,7 @@ setGame(REPLAY_GAME);
  * and a diverging game would compare two different sets of positions.
  */
 async function replayArm(sess, seat, spec, seed) {
-  const { alpha, prior, sfDepth, rounds, reach } = spec;
+  const { alpha, prior, sfDepth, rounds, reach, leafEval } = spec;
   // Fresh ENGINE, unconditionally — protocol note 4, and the counterpart of the
   // fresh agent and fresh players array below. Every arm of every game/seat
   // starts the engine from the same state, so a respawn can never land at a
@@ -309,6 +309,9 @@ async function replayArm(sess, seat, spec, seed) {
   const agent = new ChessObscuroAgent({
     rng: mulberry32(seed), ...knobs,
     ...(sfDepth ? { sfDepth } : {}), ...(rounds ? { maxRounds: rounds } : {}),
+    // An injected evaluator wins over sfDepth (ObscuroAgent._leafEval), which is
+    // how the `net:` grid config runs the distilled net on these same positions.
+    ...(leafEval ? { leafEval } : {}),
   });
   let searchMs = 0;
 
@@ -401,9 +404,27 @@ async function referencesFor(sess, seat) {
 // CFR and a WASM engine — is measurable, and this measures it. Read the output as
 // a frontier: the configuration with the lowest cp loss per millisecond wins.
 if (argv.includes('--grid')) {
+  // `net:6` selects the distilled evaluator (--net <file>) instead of a Stockfish
+  // depth, so the thing it is meant to replace sits in the same table, on the
+  // same positions, priced in the same ms/move. That is the only comparison that
+  // settles whether a student is worth having.
+  const netPath = arg('net', null);
+  let netEval = null;
+  if (netPath) {
+    const { ValueNet } = await import('../src/valueNet.js');
+    const { makeNetLeafEval } = await import('../src/ObscuroAgent.js');
+    const { readFileSync } = await import('node:fs');
+    netEval = makeNetLeafEval(ValueNet.fromJSON(JSON.parse(readFileSync(netPath, 'utf8'))));
+    console.log(`distilled evaluator: ${netPath}`);
+  }
   const configs = arg('grid', '1:24,2:12,4:6,7:3').split(',').map(s => {
-    const [d, r] = s.split(':').map(Number);
-    return { label: `depth ${d}, ${r} rounds`, sfDepth: d, rounds: r, alpha: 0 };
+    const [d, r] = s.split(':');
+    const rounds = Number(r);
+    if (d === 'net') {
+      if (!netEval) throw new Error('--grid names "net" but --net <file> was not given');
+      return { label: `net, ${rounds} rounds`, leafEval: netEval, rounds, alpha: 0 };
+    }
+    return { label: `depth ${Number(d)}, ${rounds} rounds`, sfDepth: Number(d), rounds, alpha: 0 };
   });
   const acc = configs.map(() => ({ loss: [], ms: 0, moves: 0, top: 0 }));
   // Every config replays the SAME positions, so the comparison between two of

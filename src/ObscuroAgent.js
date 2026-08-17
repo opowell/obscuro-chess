@@ -327,6 +327,41 @@ export function makeChessLeafEval(sfDepth, cols, { isCancelled } = {}) {
     (await scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled })).scores;
 }
 
+// THE DISTILLED EVALUATOR — same contract, no engine. `net` is a ValueNet
+// (src/valueNet.js) trained to reproduce Stockfish at a fixed depth, so this
+// answers the same question scoreChildren does without a UCI round trip, a
+// worker, a cache, or a timeout.
+//
+// Three differences from the engine path that are the whole point:
+//   • It is SYNCHRONOUS in substance — no awaits, no queue, no serialisation
+//     behind one worker. The engine path is the reason a move costs what it does.
+//   • It NEVER FALLS BACK. scoreChildren silently substitutes the static
+//     evaluator when the engine returns nothing, which on sampled belief worlds
+//     is ~6% of positions — the ones standard chess calls illegal (kings
+//     adjacent, side-not-to-move in check) and fog calls Tuesday. The net has an
+//     opinion about all of them, because it was TRAINED on them.
+//   • It inherits the teacher's blind spot exactly. Stockfish labels cannot see
+//     information value, so neither can this. Cheaper, not wiser.
+//
+// The sign: the net answers from the side to move at the position it is given.
+// A child has the OPPONENT to move, so its value to `mover` is the negation.
+// Hung kings are still scored directly here, as a fog loss the teacher cannot
+// see either.
+export function makeNetLeafEval(net) {
+  return async (state, mover, actions, childStates) => {
+    const them = otherColor(mover);
+    const themChar = them === 'white' ? 'w' : 'b';
+    const out = new Array(actions.length);
+    for (let i = 0; i < actions.length; i++) {
+      const board = (childStates?.[i] ?? state).board;
+      const k = findKingSquare(board, mover);
+      if (!k || isAttackedBy(board, k, them)) { out[i] = -kingHang(); continue; }
+      out[i] = clip(-net.evalBoard(board, themChar));
+    }
+    return out;
+  };
+}
+
 // Time-bounded leaf evaluator: climb the ladder one rung at a time — depth 1,
 // then 2, then 3 … — re-scoring every child from scratch at each rung, and keep
 // the deepest rung that COMPLETED before the budget ran out. Each rung is a
@@ -438,6 +473,10 @@ export class ChessObscuroAgent extends GenericObscuroAgent {
   // (every legal child, always) and as many rungs as the clock allows, which is
   // the same iterative deepening the analysis panel runs.
   _leafEval(observation) {
+    // An injected evaluator outranks every dial below — the seam a distilled net
+    // (makeNetLeafEval) or a test double plugs into, so swapping the evaluator
+    // never means editing this method.
+    if (this.opts.leafEval) return this.opts.leafEval;
     const gs = observation.gameSpecific ?? {};
     const timeMs = gs.aiTimeMs;
     if (typeof timeMs === 'number' && timeMs > 0) {
@@ -456,22 +495,39 @@ export class ChessObscuroAgent extends GenericObscuroAgent {
       });
     }
     const t = difficultyToNumber(gs.difficulty) / 100;
-    // Leaf depth tops out at 4, NOT 7 — measured, not guessed. ~80% of a move's
-    // wall clock is inside these calls (~7 ms at depth 2, ~11 ms at 4, ~23 ms at
-    // 7), so depth trades directly against tree size, and move-quality.mjs
-    // measured that trade on 128 identical positions at matched cost (~1.0 s/move
-    // both ways): mean cp loss against a deep reference was
+    // LEAF DEPTH TOPS OUT AT 4, AND THE MEASUREMENT NOW SAYS IT SHOULD NOT.
+    //
+    // The numbers that set this range are VOID. They came from the harness that
+    // committed the agent's own unplayed pick on top of the recorded move, which
+    // killed the exact belief on ply 2 — every pre-2026-08-07 move-quality figure
+    // has that defect. They read:
     //
     //   depth 2, 18 rounds  108.9      depth 7, 4 rounds  121.5
     //   depth 4,  8 rounds  109.2      depth 1, 36 rounds 142.3
     //
-    // Depth 7 is DOMINATED — it buys tactical leaves with tree size, and the tree
-    // was worth more. Depth 1 is the paper's own design point and is the worst
-    // option here, because our trees are ~100× smaller than the ~10⁶-node trees
-    // that make shallow leaves work: at this scale the leaves have to see the
-    // tactics the tree cannot. Revisit the top of this range only after the tree
-    // grows by an order of magnitude. `sfDepth` overrides it so that re-measuring
-    // stays a flag rather than an edit.
+    // and concluded "depth 7 is DOMINATED". Do not quote them.
+    //
+    // 2026-08-12, remeasured on the repaired instrument (null control 100.0%
+    // identical / 0.00 cp), 120 games / 6,520 PAIRED positions, twice — once
+    // trading depth against rounds and once at FIXED rounds, so the confound is
+    // separated rather than argued about:
+    //
+    //   vs depth 1        d2 −1.07 ± 1.02   d4 −1.79 ± 1.02   d7 −5.09 ± 1.03
+    //   fixed 6 rounds    d2 −1.10 ± 0.99   d4 −0.90 ± 1.01   d7 −4.27 ± 1.02
+    //
+    // Depth 7 wins decisively either way (z = −4.2 to −4.9) and depths 1, 2 and 4
+    // are INDISTINGUISHABLE from each other. Depth 7 scored 63.9 mean cp at both
+    // 3 rounds and 6 rounds, while depth 1 scored 69.0 at 24 rounds and 68.1 at
+    // 6: quadrupling the tree bought nothing, and deepening the leaf bought 4-5
+    // cp. The old reading had it exactly backwards — it is the LEAVES that are
+    // worth more here, not the tree, which is also why the paper's depth 1 is the
+    // worst option at our scale.
+    //
+    // So this range is kept only because raising it costs time nobody has
+    // measured a budget for: depth 7 is 1031 ms/move at fixed rounds against 159
+    // at depth 1. The right fix is not a bigger number here but a cheaper way to
+    // buy the same judgement — see makeNetLeafEval, which is that attempt.
+    // `sfDepth` overrides this, so re-measuring stays a flag rather than an edit.
     const { sfDepth: sfDepthR, cols: colsR } = chessDial().leafEval;
     const sfDepth = this.opts.sfDepth ?? Math.max(1, ramp(sfDepthR, t));
     const cols = ramp(colsR, t);
