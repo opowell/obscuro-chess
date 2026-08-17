@@ -1,244 +1,441 @@
-# Obscuro chess: a roadmap for playing strength — plan doc
+# Obscuro chess: playing strength — what's done, what's left
 
-Standalone working doc. Written 2026-08-17. Safe to read cold in a new session.
-Companion to [FOG-AI-FIX-PLAN.md](FOG-AI-FIX-PLAN.md) (search-side king safety —
-already fixed), [MOVE-PRIOR-PLAN.md](MOVE-PRIOR-PLAN.md) (the belief and its
-prior — most of this doc's Phase 1–2 build directly on its most recent entries),
-[UNLIMITED-BELIEF-PLAN.md](UNLIMITED-BELIEF-PLAN.md) (the belief-population
-batched walk) and [ANALYSIS-DEPTH-PLAN.md](ANALYSIS-DEPTH-PLAN.md) (iterative
-deepening in the analysis panel — not real play, but the TIME-mode machinery
-Phase 3 reuses).
+Standalone reference doc, safe to read cold in a new session. Consolidates
+the search-correctness work, the belief and move-prior system, and the
+analysis-panel work that used to live across four separate planning docs,
+alongside the open roadmap for playing strength. `NEXT STEPS.md` points here.
 
 ## The ask
 
-`NEXT STEPS.md` states the standing open question in one line: *"What is the
-key to improving strength? Converting belief accuracy into strength is the open
-problem, and a bigger corpus is not on its own the answer."* This doc is the
-answer to "what do we do about that" — a prioritized, independently-measurable
-roadmap, written after auditing every existing planning doc and the settled/
-void measurements in `docs/PARAMETERS.md`.
+`NEXT STEPS.md`'s standing question: *"What is the key to improving
+strength? Converting belief accuracy into strength is the open problem, and a
+bigger corpus is not on its own the answer."* Part 1 below is everything
+already built that the answer has to work with. Part 2 is the prioritized,
+independently-measurable roadmap for what's left.
 
-## Status
+## Part 1 — what's been done
 
-Two things landed recently that change what's actually open:
+### Search correctness: the equilibrium search plays sound fog chess
 
-- **`sampleAlpha` now ships at 1** (`258a3c8`). Belief worlds are drawn
-  proportional to the posterior instead of uniformly over `P`. This is real
-  progress on the open question above, not just another null result — see
-  Phase 1–2 below for what it actually settles and what it doesn't.
-- **Leaf-net distillation was tried twice and is closed** (`3743d0e`,
-  `c7ecbbb`). A 768→32→1 net (v1) and a king-bucketed-feature net (v2) both
-  fail to close a ~1000× data gap between this project's ~2M labelled
-  positions and what a from-scratch NNUE-scale evaluator needs. See Phase 4 —
-  do not reopen without a much larger data source.
+The generic search (`vendor/obscuro`) implements the paper's algorithm — GT-CFR
+tree growth, PCFR+, the KLUSS Resolve/Maxmargin safety gadget, purification —
+and the chess layer's job is to hand it a consistent belief and a real leaf
+evaluation. Several structural bugs in how that handoff worked were found and
+fixed:
 
-One loose end from that work: fixing the leaf-net comment also corrected a
-stale claim on `_leafEval` that used to justify capping leaf-search depth at 4
-("depth 7 is dominated"). The comment is fixed; the actual dial constant is
-not — that's Phase 1, item 1 below.
+- **Root-infoset fragmentation.** Infoset keys used to be recomputed per
+  sampled belief world, so imagined hidden pieces landed each world in its own
+  singleton root infoset — the fog search was effectively a single-world
+  search. Every root world is now forced into one shared root infoset
+  (`gtcfr.js` `expandRoot`).
+- **Check-filtered action sets broke the infoset invariant.** An earlier fix
+  for a phantom-win bug filtered "in check" moves out of the tree's legal-action
+  set, but check depends on hidden pieces, so the legal set differed across
+  worlds sharing one observation. The tree now uses the real fog pseudo-legal
+  action set and punishes self-check by value (a suicide move evaluates to
+  −SEARCH_WIN for the mover) instead of filtering it — which also re-fixes the
+  phantom-win bug, correctly this time.
+- **`uCond` now uses full reach** `π(h) = reachMe·reachOpp` (paper App. B.1)
+  instead of the acting player's own reach alone, so root values, PUCT
+  expansion and the analysis panel all see the opponent's actual pressure.
+- **Terminal values are bounded** (`SEARCH_WIN = 8000`, vs. unbounded `±10⁶`)
+  so one phantom world where the enemy king looks capturable can't swamp
+  everything; a certain loss (own king hung) is asymmetrically penalized versus
+  a phantom capture of the enemy king, which stays capped at `+LEAF_CLAMP`.
+- **Belief-generation fixes**: forced-capture-square inference places a real
+  piece (weighted by proximity and inverse value, favoring the least valuable
+  recapturing piece) instead of a random one; phantom self-check worlds are
+  rejected during sampling; `Belief.beginTurn` is idempotent per turn.
+- **Expansion respects the KLUSS gadget** — root-world sampling reads the
+  gadget's class reach (`tree.gadget`) instead of raw belief mass, per the
+  paper's Fig. 12.
+- **Gadget alternate-value calibration** uses the world's own engine-informed
+  best-child value (`alt = min{ṽ(h), v*}`) instead of a static heuristic,
+  fixing a class-tunnel-vision failure mode where the strategy optimized
+  against 1–2 junk worlds.
+- **Node-level tree carryover**: the previous move's entire solved tree is
+  kept and grafted onto the new root, bringing carried alternate values and
+  true opponent-class identity forward; freshly sampled worlds are singleton
+  classes with a perfectly-informed opponent, matching the paper's Fig. 9
+  line 13.
+- **Sequence-scoped opponent infosets**: the opponent's in-tree infosets key
+  on their chain-hashed observation sequence; our own infosets deliberately
+  stay Markov-keyed (player/turn/board) — a safe restriction on our own
+  strategy that buys transposition sharing without underestimating the
+  opponent.
 
-## Phase 1 — ship what's already measured but not deployed
+Validated end to end by seat-swapped self-play: king-hang-with-a-safe-move-
+available rate holds at ~1.4% (95% CI 0.9–1.95%) across power levels,
+comfortably under target, with no separate safety backstop needed — play is
+equilibrium-driven.
 
-Near-zero research risk: both items below are "the measurement exists,
-someone still needs to move the constant and re-verify at production settings."
+### Leaf evaluation correctness
 
-### 1. Raise the leaf-search depth ceiling — `src/ObscuroAgent.js`
+Two silent-failure modes in the Stockfish leaf evaluator were found and fixed:
 
-`CHESS_DIAL.leafEval.sfDepth` still reads `{ min: 2, max: 4, curve: 'linear' }`.
-The leaf-depth grid (6,520 paired positions, 120 crawl games, worlds=16,
-reference depth 12 — see memory `leaf-depth-grid`, and the corrected comment in
-commit `3743d0e`) found:
+- **The engine refuses to score positions that are illegal in standard chess
+  but ordinary under fog** (enemy king en prise, kings adjacent, side-to-move
+  can capture the king) — a `multiPV` call on such a node returns zero lines,
+  and the caller silently fell back to the static evaluator for every child.
+  `scoreChildren` now detects a refusal in advance and prices each child
+  individually (capped at `REFUSED_CHILD_CAP = 8`, best-static-score first)
+  instead.
+- **The evaluator was being fed genuinely illegal FEN positions** from two
+  sources: castling rights that contradicted the board (now derived from
+  board state — a right is only claimed when the king and matching rook are
+  actually on their home squares), and impossible piece placements (a pawn on
+  its own first rank, or a piece type mismatched with a promotion-rank square)
+  surviving belief's contradiction-fallback and particle sampler. Both are now
+  filtered at the source.
 
-| config | mean cp | median | ms/move | best-move% |
-|---|---|---|---|---|
-| depth 1, 24 rounds | 69.0 | 33.0 | 550 | 24.5 |
-| depth 2, 12 rounds | 68.0 | 31.0 | 403 | 25.4 |
-| depth 4, 6 rounds | 67.2 | 30.0 | 405 | 25.9 |
-| depth 7, 3 rounds | 63.9 | 24.0 | 666 | 29.2 |
+### Exact belief tracking — the position set P
 
-Depth 7 beats depths 1/2/4 decisively (paired vs depth 4: −3.30 ± 0.98 cp,
-z=−3.36); depths 1, 2 and 4 are statistically indistinguishable from each
-other. The dial's current ceiling of 4 is therefore not measurably better than
-depth 1, and the number that used to justify stopping there is void.
+`src/exactBelief.js` maintains every position consistent with the full
+observation history (the paper's belief set P), advanced one opponent ply per
+turn and filtered against each new observation. It's built on a compact
+representation — `Int8Array(66)` positions, array-based fog move generation
+mirroring the rules engine, a fixed-seed Zobrist hash for dedupe — that is
+roughly an order of magnitude faster per candidate and smaller per position
+than an earlier object-based version, which is what lets the tracked-set cap
+sit at 200,000 rather than the tens of thousands it started at. When
+exactness is lost (cap exceeded, a time guard trips, or the tracker attaches
+mid-game), play falls back seamlessly to a heuristic particle belief
+(`src/belief.js`) kept in lockstep, and a re-acquisition path rebuilds a
+(superset) exact set once few enough pieces are hidden to make the
+cross-product tractable again.
 
-**Before just changing the constant**: the grid above traded depth against
-*rounds* as its own experimental design (depth 7 only got 3 rounds). Production
-doesn't spend its budget that way — round count comes from
-`search.DIAL.power.maxRounds` (a separate knob, range 6–100), independently of
-`sfDepth`. Re-run `move-quality.mjs --grid` at the actual production dial
-settings (not the grid's isolated frontier) before picking a new ceiling, then
-raise `sfDepth`'s `max` (7 is the best-supported starting point) and update
-this doc's citation plus `docs/PARAMETERS.md` §2.2 per the parameter-change
-checklist in that doc's §3.
+### A weighted belief, and a fitted move prior
 
-### 2. Reduce belief-tracking censoring around `sampleAlpha=1` — `src/exactBelief.js`
+The belief set started as literally a *set* — every consistent position
+equally likely, because nothing modeled how the opponent actually chooses
+moves. Two changes turn it into a real posterior:
 
-`CAP` (200,000) and `TIME_GUARD_MS` (4,000) are unchanged from before the
-α flip. The commit that shipped α=1 measured its own defaults working against
-it: at `CAP=200,000` / `guard=4,000ms`, exact tracking is abandoned — stickily,
-for the rest of the game — on 29% of the high-`|P|` turns where α=1's benefit
-concentrates, dragging the measured gain from −2.78 ± 0.59 cp to −1.64 ± 0.63
-cp. The α=1 result was itself measured at `CAP=2e6` / `guard=180s` specifically
-to avoid this censoring.
+- **The mechanism**: `exactBelief.js` carries a weight per position, and
+  positions reached by multiple histories accumulate weight (a Map-based
+  dedupe that sums on collision) instead of the second arrival being silently
+  dropped. This alone — even feeding it a uniform per-move prior — produces a
+  non-uniform posterior, because a state reachable from several parents
+  accumulates their mass and a parent with fewer legal moves passes more mass
+  to each child.
+- **The model** (`src/movePrior.js`): π(move | position), a conditional-logit
+  softmax over a handful of O(1)-per-move features (capture value, promotion
+  value, a piece-square-table delta, a castling bonus), fitted by
+  maximum-likelihood on recorded games (`scripts/fit-move-prior.mjs`) rather
+  than hand-tuned. Per-term weights matter because the terms want very
+  different effective temperatures — one shared temperature can't serve all
+  nine parameters at once.
 
-Exact-belief updates are cheap on their own (~1µs/candidate after the Tier-1
-compact-representation rewrite — see `FOG-AI-FIX-PLAN.md`'s "Third follow-up
-round"), so raising these two constants toward production-safe values (not all
-the way to the 2e6/180s measurement config, which was chosen for statistical
-power, not for serving) may reclaim a real fraction of that 1.1 cp for a real
-but likely modest latency cost. Measure per-move wall-clock and give-up rate at
-a few intermediate settings (e.g. `CAP` in the low millions, `guard` in the
-8–15s range) under actual production round/world budgets before picking new
-defaults — this repo's whole history is measure-before-ship, and this constant
-in particular (`TIME_GUARD_MS`) trades directly against `beginTurn` latency,
-which past incidents (`_giveUp()` firing under load) have shown is not free to
-spend carelessly.
+Consumers were updated to actually use the weights: `samplePositions` draws
+weighted (without replacement), `rankByLikelihood` (renamed from a
+marginal-probability surrogate that existed only because there was nothing
+better) sorts by real posterior weight, and the analysis panel's aggregates
+are mass-weighted rather than count-weighted.
 
-## Phase 2 — close the "does it actually win games" gap
+Belief worlds are now also **drawn by the posterior** rather than uniformly
+(`sampleAlpha = 1`) — the search samples the opponent's plausible moves more
+often than their implausible ones, rather than treating every consistent
+position as equally worth searching. A separate CFR-reach-weighting knob
+(drawn-world *importance* inside the solve) is subsumed by this and now inert
+by default, since weighting an already-posterior-drawn sample by the same
+posterior again would double-count it.
 
-This is the highest-priority open question in the whole roadmap, because every
-other phase either assumes α=1 is a real strength gain or is orthogonal to it.
+Supporting infrastructure that shipped alongside the model: a corpus loader
+handling directories, zips, PGN (with ratings) and session/crawl JSON behind
+one interface (`corpus.js`/`pgn.js`/`zip.js`); a rating-conditioning mechanism
+that tilts every prior weight continuously by the opponent's rating rather
+than bucketing (`RATING_SLOPE`, `RATING_PIVOT`/`SCALE`/`Z_CLAMP`); a
+belief-calibration harness (`scripts/calibrate-belief.mjs`) measuring how much
+probability the belief puts on the true position; a paired per-move cp-loss
+harness against a deep reference search (`scripts/move-quality.mjs`), hardened
+for measurement determinism (forces a fresh engine hash per search, and gives
+the caller ownership of the engine-worker respawn boundary, since a mid-run
+recycle desyncs a paired comparison); a seat-swapped self-play strength
+harness (`scripts/strength-belief.mjs`); and a one-command adoption pipeline
+(`scripts/adopt-corpus.mjs`) that measures ingest health, fits, and refuses to
+ship a refit that doesn't beat the shipped weights on the belief-calibration
+gate.
 
-α=1 shipped on a **cp-loss-vs-depth-12-reference** proxy — explicitly
-acknowledged in the shipping commit as "blind to information value" (it can't
-credit a move for managing what the opponent does or doesn't get to see, only
-for matching a perfect-information engine's opinion of the position). The only
-actual win/loss self-play measurement on record is 15 games and points the
-*other* direction (4–11 for α=0) — far too small to trust, and itself run
-before the harness's determinism fixes (`FRESH_HASH`, no mid-run engine
-recycling — see memory `paired-measurement-determinism`).
+### The analysis panel: exhaustive belief walks and iterative deepening
 
-**Next step**: run `scripts/strength-belief.mjs --arm alpha` seat-swapped,
-at the scale the script's own header says is needed — "hundreds of games," not
-15. Throughput reference: self-play measured ~0.35s/ply at difficulty 25, up to
-~2.06s/ply at difficulty 100 (`MOVE-PRIOR-PLAN.md`, "The corpus is the binding
-constraint" section). A few hundred games × ~30–60 plies × 2 (seat swap) is
-multi-hour-to-overnight wall-clock; games are independent, so parallelize
-across processes/cores rather than running serially.
+Scoped to the read-only analysis panel, not real move selection. Perfect
+information and fog are now one code path rather than two: a fully-known
+position is the degenerate case of a belief population of size 1, handled by
+the same batched-walk machinery as a genuinely fogged position with thousands
+of consistent worlds. That walk enumerates the belief population without
+replacement in batches (rather than resampling with replacement forever),
+reports `{evaluated, total, exhaustive}` coverage, and — for the exact-belief
+case — actually converges and stops once every consistent position has been
+scored. Each world's leaf evaluation runs an iterative-deepening ladder up to
+`MAX_SF_DEPTH = 30`, live depth ticks forwarded into the same progress stream,
+and an in-flight deep search can be interrupted (`UCI stop`) so cancelling
+feels responsive even mid-search. The whole thing also runs client-side in a
+browser Web Worker (`src/stockfish.js` is browser-safe behind a Node/browser
+guard, a `/lib` static route serves the module graph to the worker, and a
+`cp-eval` endpoint supplies the leaf evaluation the browser has no local
+Stockfish for) so analysis never blocks the server or the UI thread.
+
+### Settled research findings
+
+Durable conclusions worth not re-deriving:
+
+- **Depth-1 leaf evaluation — the paper's own design point — does not
+  transfer at this engine's tree scale.** The paper's strength comes from
+  aggregating ~10⁶-node trees over shallow leaves; this engine's trees are
+  roughly two orders of magnitude smaller, so leaves have to carry tactics the
+  tree itself cannot find. A paired measurement over thousands of positions
+  found leaf depth 7 beats depths 1/2/4 decisively, with 1/2/4 statistically
+  indistinguishable from each other.
+- **A fitted move-prior beats a uniform one substantially** on belief
+  calibration (log-loss of the true position), and the belief-set weighting
+  mechanism alone (even before any real model) already beats an unweighted
+  flat posterior.
+- **The capture term contributes little; piece-square-table deltas and a
+  castling bonus carry almost the entire signal.** An earlier hypothesis that
+  captures would dominate (real players take material) did not hold up.
+- **The king piece-square-table term is noise, not signal, at adequate corpus
+  size.** An early, small corpus produced a confidently negative king weight
+  ("fog players walk their king out") that looked like a real qualitative
+  finding; on a much larger corpus the term's sign flips across
+  cross-validation folds and carries no consistent signal — it was one
+  player's habit, not a property of fog play.
+- **Over-sharpening a prior is catastrophic, not just wasteful.** Past a
+  certain temperature the belief becomes worse than assuming nothing at all,
+  even though a naive ranking metric (median rank of the truth) keeps looking
+  like it's improving right through the collapse — log-loss, not rank, is the
+  metric that catches this. A small uniform-mixing floor bounds the worst
+  case.
+- **Opponent-conditioning the move prior — by rating, by actor type, or by
+  strength bucket — has not beaten the pooled model, in three separate
+  attempts.** Populations plausibly do differ, but there isn't yet enough data
+  to estimate the extra parameters without the added variance costing more
+  than the reduced bias buys back. Self-play cannot supply the missing data
+  either: fitting the prior on self-play games makes it a model of this engine
+  rather than of real opponents, which measurably hurts play against humans.
+- **A better-calibrated belief does not automatically play better** — it
+  reaches move selection through exactly one channel (which worlds the search
+  draws), and until that channel is actually turned on (see belief-weighted
+  sampling above), sharpening the belief only changes what the analysis panel
+  displays, not what the AI plays.
+- **Distilling the Stockfish leaf evaluator into a small trained network does
+  not work at this project's data scale.** Two independent architecture
+  attempts (a small dense net, and a version with king-relative input features
+  mirroring NNUE's approach) both plateau far short of even a depth-1 real
+  search on ranking quality and move agreement. The gap tracks data volume,
+  not architecture — a real leaf search's target evaluator (Stockfish's own
+  NNUE) trained on roughly three orders of magnitude more positions than this
+  project's largest measurement run produced, and neither self-play throughput
+  nor an outcome-based training target closes that gap at a practical
+  timescale.
+- **Weighted tail-pruning of the belief set at its capacity limit was
+  considered and deliberately not implemented.** It would trade the tracker's
+  central invariant — the true position is always in the tracked set — for a
+  softer failure mode, and the positions a prior would prune are
+  disproportionately the surprising ones, which is exactly when the true
+  position is most likely to be one of them.
+
+## Part 2 — what's left to do
+
+### Ship what's already measured but not deployed
+
+Two low-risk items where the measurement exists and only the shipped constant
+hasn't moved yet:
+
+1. **Raise the leaf-search depth ceiling** (`CHESS_DIAL.leafEval.sfDepth` in
+   `src/ObscuroAgent.js`, currently `{min: 2, max: 4}`). The settled finding
+   above (depth 7 beats 1/2/4 decisively) argues for raising the ceiling, but
+   that measurement traded depth against search-round count as its own
+   experimental design, while production spends its round budget independently
+   (`search.DIAL.power.maxRounds`). Re-run `move-quality.mjs --grid` at actual
+   production dial settings before picking a new ceiling — don't just copy the
+   isolated grid number — then raise `sfDepth`'s `max` (7 is the
+   best-supported starting point) and update `docs/PARAMETERS.md` §2.2 per
+   that doc's own parameter-change checklist.
+
+2. **Reduce belief-tracking censoring around posterior-weighted sampling**
+   (`CAP` and `TIME_GUARD_MS` in `src/exactBelief.js`, currently 200,000 /
+   4,000ms). At those defaults, exact tracking is abandoned — stickily, for
+   the rest of the game — on a meaningful share of the high-`|P|` turns where
+   posterior-weighted sampling's benefit concentrates, which measurably drags
+   down the benefit versus tracking exactly all the way through. Exact-belief
+   updates are cheap on their own (roughly a microsecond per candidate on the
+   compact representation), so raising these two constants toward
+   production-safe values may reclaim a real fraction of that loss for a
+   modest latency cost — measure per-move wall-clock and give-up rate at a few
+   intermediate settings under actual production round/world budgets before
+   choosing new defaults.
+
+### Close the "does it actually win games" gap
+
+The highest-priority open question: posterior-weighted world sampling shipped
+on a cp-loss-vs-deep-reference proxy that is explicitly blind to fog-specific
+information value (it can't credit a move for managing what the opponent
+does or doesn't get to see, only for matching a perfect-information engine's
+opinion of the position). The only actual win/loss self-play measurement
+available is small (15 games) and points the opposite direction — far too
+underpowered to trust, and predating the harness's determinism fixes.
+
+Next step: a properly-powered seat-swapped self-play run
+(`scripts/strength-belief.mjs --arm alpha`), at the scale the script's own
+documentation says is needed — hundreds of games, not fifteen. Self-play
+throughput is roughly 0.35–2 seconds per ply depending on difficulty, so a few
+hundred games at typical game length is multi-hour-to-overnight wall-clock;
+games are independent, so parallelize across processes rather than running
+serially.
 
 Two outcomes to plan for:
-- **Confirmed** (α=1 wins more games, not just lower cp-loss): the shipped
-  default is validated on the actual target metric, not just the proxy. Done.
-- **Not confirmed, or reversed**: this becomes the next real research question
-  — *why* does a metric that says "more accurate against a perfect-information
-  referee" disagree with actual fog-chess outcomes? One live hypothesis worth
-  checking first: does weighting the search's world draw toward the
-  most-likely opponent lines under-hedge against surprising-but-plausible ones
-  that the depth-12 proxy doesn't distinguish from "the AI made a good
-  decision under uncertainty"? Don't guess past this — instrument it and
-  measure, the way every other question in this doc's ancestry was resolved.
+- **Confirmed** (posterior-weighted sampling wins more games, not just lower
+  cp-loss): the shipped default is validated on the actual target metric, not
+  just the proxy.
+- **Not confirmed, or reversed**: the real research question becomes *why* a
+  metric that rewards matching a perfect-information referee disagrees with
+  actual fog-chess outcomes — one hypothesis worth checking first is whether
+  weighting the search's world draw toward the most-likely opponent lines
+  under-hedges against surprising-but-plausible ones that the proxy can't
+  distinguish from good play under uncertainty. Instrument and measure rather
+  than guessing past it.
 
-## Phase 3 — attack the actual resource ceiling
+### Attack the actual resource ceiling
 
-Everything above trades against wall-clock: deeper leaves, a looser belief
-cap, more belief worlds, more CFR rounds all cost more time per move. This
-phase buys back that budget, and its payoff compounds with every item above.
+Every item above trades against wall-clock — deeper leaves, a looser belief
+cap, more belief worlds, more search rounds all cost more time per move. This
+buys back that budget, and its payoff compounds with everything above it.
 
-### 1. Parallelize the Stockfish leaf evaluator across a worker pool
+1. **Parallelize the Stockfish leaf evaluator across a worker pool.**
+   Profiling a real move found roughly 80% of move time inside Stockfish
+   (batched across belief worlds and node children — embarrassingly
+   parallel) and roughly 20% in single-threaded CFR; Amdahl's law caps a
+   worker pool at roughly 5× on that split, and the engine backend
+   (`src/stockfish.js`) currently uses exactly one worker regardless of how
+   many cores are available. Pure engineering, no open research question, and
+   it's the single lever that makes every leaf-depth or belief-cap increase
+   above cheaper to afford.
 
-Already scoped, not yet built. Profiling a real move (`MOVE-PRIOR-PLAN.md`,
-"Search scale" section) found ~80% of move time inside Stockfish (batched
-across belief worlds and node children — embarrassingly parallel), ~20%
-single-threaded JS CFR. Amdahl's law caps a worker pool at roughly 5× on that
-split; the measurement machine has 14 cores and `src/stockfish.js` uses
-exactly one today. This is pure engineering — no open research question — and
-it's the single lever that makes every other phase's cost cheaper to spend:
-raising leaf depth (Phase 1.1), raising the belief cap (Phase 1.2), and
-widening belief-world counts all become more affordable per unit of wall-clock
-once leaf evaluation itself is parallel.
+2. **Ship a "strongest" preset** (`src/presets.js`, mirroring the existing
+   `paper` preset). The generic search's POWER-mode dial is hard-capped well
+   below what the engine can otherwise do (worlds, round count and tree-size
+   ceilings all bounded fairly low), while TIME mode's ceilings are far
+   looser and bounded mainly by the actual clock given — including the
+   iterative-deepening ladder the analysis panel already uses, which real move
+   selection doesn't currently reuse. For "as strong as possible" whenever an
+   opponent's clock allows it, TIME mode with a generous time budget is very
+   likely already the strongest configuration this engine can produce — no new
+   algorithm work, just the right settings, expressed as a named preset
+   instead of a hand-assembled settings file. Measure it against the current
+   strongest POWER-mode default before shipping it as a recommendation, same
+   as any other preset.
 
-Parallelizing the CFR pass itself is a separate, harder problem (sequential
-regret updates) — lower priority; only revisit if the worker pool alone
-doesn't unlock enough headroom.
+### Belief-tracking scaling and correctness (real play, lower priority)
 
-### 2. Ship a "strongest" preset — `src/presets.js`
+- **Exact-belief re-acquisition currently yields a superset, not the literal
+  history-exact set**, once exactness has been lost and rebuilt from the
+  heuristic belief's per-piece possible-squares. If real games show this
+  mattering, tightening it is future work, not yet scoped in detail.
+- **If the belief-tracking cap (200,000) ever proves tight even after
+  parallelizing leaf evaluation**, the follow-on scaling work, cheapest first,
+  is: incremental ray-patched visibility, then speculative belief-advance
+  during the opponent's thinking time, then a bitboard rewrite of the
+  exact-belief representation.
+- **Opponent-model-weighted sampling from the belief set beyond today's
+  posterior weighting** — the paper's own closing suggestion — remains
+  unexplored, as does a learned leaf evaluation for non-chess games built on
+  this engine.
 
-The generic search's own dial (`vendor/obscuro/docs/PARAMETERS.md` §1.2) shows
-POWER mode is hard-capped well below what the engine can otherwise do: worlds
-1–48, `timeBudgetMs` 30–2000, `maxRounds` 6–100, `maxInfosets` 400–6000. TIME
-mode's ceilings are far looser — worlds 4–48, `maxRounds` effectively
-unbounded (100000, constant), `maxInfosets` 1000–25000 — and chess's own
-iterative-deepening ladder (`ANALYSIS-DEPTH-PLAN.md`) climbs leaf search to
-`MAX_SF_DEPTH=30`, bounded only by the actual clock given via `aiTimeMs`.
+### Analysis-panel-only refinements (not real play)
 
-For "as strong as possible" whenever an opponent's clock allows it, TIME mode
-with a generous `aiTimeMs` is very likely already the strongest configuration
-this engine can produce today — no new algorithm work, just the right
-settings. Mirroring the existing `--preset paper` pattern (`src/presets.js`),
-add a named preset that pins TIME mode with a large default budget, so
-"play as strong as you can" is a `--preset` flag rather than a hand-assembled
-settings file. Measure it against the current difficulty-100 POWER-mode
-default with `move-quality.mjs` before shipping it as a recommendation, same
-as every other preset in that file.
+- **A true joint-equilibrium mixing over the whole belief population**
+  (rather than today's ensemble average of per-batch equilibria) is a real but
+  unresolved research question, not yet attempted: it would need the KLUSS
+  safety gadget to grow its opponent-class set mid-solve, which raises an open
+  question about whether the paper's own safety proof still holds under a
+  growing class set. A safer intermediate worth trying first, if this becomes
+  a priority, is periodic gadget rebuild with regret-state carryover
+  (warm-starting each rebuild from the previous solve's accumulated regret)
+  rather than true incremental injection.
+- **The human side of a live game's exact belief is only maintained when
+  Obscuro itself is the one moving**, not for every ply a human plays — so
+  analysis-panel exhaustion on a human's own game is reachable only late, once
+  few enough pieces are hidden. Maintaining it incrementally for every
+  committed ply would let mid-game exhaustion happen sooner; deferred because
+  it touches the move-commit path and needs every ply fed to the tracker in
+  order.
 
-## Phase 4 — data (longer horizon, lower near-term priority)
+### Data and longer-horizon research
 
-### 1. Move-prior opponent-conditioning stays null
+- **Move-prior opponent-conditioning stays unproven, pending more data.** The
+  settled finding above (three separate null results) is attributed to data
+  volume, not a modeling failure, and self-play cannot supply the missing data
+  (it makes the prior a model of this engine rather than of real opponents).
+  Only a larger *external* human corpus helps here — further recorded
+  fog-chess games beyond what's already loaded — and per the standing open
+  question this doc opens with, a bigger corpus alone is explicitly not the
+  strength bottleneck, so this stays deprioritized relative to everything
+  above.
+- **Leaf-net distillation is closed — do not reopen without a data source
+  roughly three orders of magnitude larger than what's been tried.** Two
+  independent architecture attempts both plateaued at the same data-volume
+  wall; capacity and feature changes moved nothing.
+- **A "gives check" feature for the move prior was considered and left out**
+  — it's not computable in constant time on the typed board representation the
+  prior needs, and given that piece-square deltas rather than material carry
+  the signal, there's no evidence it would earn back that cost.
+- **Explicitly out of scope, not merely deprioritized**: modeling the
+  opponent recursively (as a player who models us modeling them, and so on —
+  stop at one level, a fixed static opponent model), and correcting the move
+  prior's fog asymmetry (it scores from the mover's true position, when a
+  principled model would score from what the *mover* could see under their
+  own fog — a whole extra belief computation per node, not affordable at this
+  budget).
 
-Rating slopes and actor-type conditioning have failed to beat the pooled model
-three separate times now (`MOVE-PRIOR-PLAN.md`), each time attributed to data
-volume rather than a modeling failure — the populations genuinely differ, but
-246 games / 14,836 decisions isn't enough to estimate nine per-band parameters
-without the added variance costing more than the reduced bias buys back.
-**Self-play cannot supply this data**: fitting π on self-play makes it a model
-of Obscuro, measurably worse against humans (2026-08-05 finding). Only a
-larger *external* human corpus helps (further Chess.com Fog of War crawls,
-extending the one already in this checkout at
-`fow-crawl-2026-08-06T17-38-19-279Z.json`), and per `NEXT STEPS.md`'s own
-framing, a bigger corpus alone is explicitly not the bottleneck on strength.
-Deprioritized relative to Phases 1–3.
+## Verification discipline for every item above
 
-### 2. Leaf-net distillation is closed — do not reopen without ~1000× more data
-
-Two independent architecture attempts (plain 768→32→1, then king-bucketed
-features mirroring NNUE's HalfKP trick) both plateau at the same ceiling: top-1
-move agreement ~21%, Spearman ~0.33, against Stockfish depth-1's own 38.2%/
-0.641 on identical holdout nodes. The gap is data volume (~2M samples vs. the
-billions Stockfish's own NNUE trained on), not capacity or features — both
-attempts to fix it that way moved nothing. Self-play throughput can't close
-the gap either: a measurement run yields ~1.5M labelled children, so reaching
-NNUE-scale data is ~700 runs at hours each; training on game outcomes instead
-of search scores is worse off (~1 independent label per game, not ~55). See
-memory `distilled-leaf-net` and commits `3743d0e`/`c7ecbbb` for the full
-record before considering this again.
-
-## Verification discipline for every phase above
-
-This repo has a long, specific history of confident-wrong numbers from
-otherwise-reasonable-looking measurements (see `docs/PARAMETERS.md` §2.4.1,
-and memory `paired-measurement-determinism`). Whoever executes a phase above
-should follow the same discipline that got every number in this doc to a
-trustworthy state:
+This project has a long, specific history of confident-wrong numbers from
+otherwise-reasonable-looking measurements. Anything above that involves a
+measurement should follow the same discipline that produced every
+trustworthy number already on record:
 
 - **Paired, seat-swapped measurement** — never a raw win/loss tally on
-  unswapped seats (white wins ~10–11 of every 12 games regardless of arm; see
-  `strength-belief.mjs`'s own header).
+  unswapped seats (white's structural advantage under fog dwarfs any measured
+  effect and swamps an unswapped comparison).
 - **Run the null control first.** Two identically-configured arms must agree
-  100.0% / 0.00 ± 0.00 cp. Anything less means the instrument, not the
-  question under test, is what moved.
-- **`FRESH_HASH` on, and no mid-run engine worker recycling** — `go depth N`
-  is not a pure function of the position otherwise (Stockfish carries its
-  transposition table across searches), and a worker respawned on a
-  cache-hit-insensitive counter desyncs a paired comparison's two arms.
-- **Watch `move-quality.mjs`'s exact-`|P|` health line.** A run under ~80%
-  exact tracking is comparing two arms that both collapsed to the heuristic
-  fallback, which α and the belief-population items above are not knobs on.
-- **Each phase lands in its own git worktree**, branched from `origin/main`,
-  per the outer `battle-simulator` repo's `CLAUDE.md` (this is a shared
-  alpha-stage checkout with other agents potentially active concurrently).
+  essentially 100%. Anything less means the instrument, not the question
+  under test, is what moved.
+- **A fresh engine hash per search, and no mid-run engine-worker recycling**
+  — a chess engine that carries state across searches (transposition tables,
+  in this case) is not a pure function of the position, and a worker
+  respawned on a cache-insensitive counter desyncs a paired comparison's two
+  arms.
+- **Watch the exact-belief-tracking health of a run.** A run where a large
+  share of positions have already fallen back to the heuristic belief is
+  comparing two arms that both collapsed to the same fallback, which several
+  of the knobs above are not levers on at all.
+- **Each item above lands in its own git worktree**, per the outer
+  `battle-simulator` repo's `CLAUDE.md` — this is a shared, alpha-stage
+  checkout with other agents potentially active concurrently.
 
 ## Key files
 
-- `src/ObscuroAgent.js` — `CHESS_DIAL.leafEval.sfDepth` (Phase 1.1), the
-  Stockfish call sites a worker pool would parallelize (Phase 3.1).
-- `src/exactBelief.js` — `CAP`, `TIME_GUARD_MS`, `SAMPLE_ALPHA_DEFAULT`
-  (Phase 1.2, already 1 on `origin/main`).
-- `src/presets.js` — where a "strongest" preset belongs (Phase 3.2), alongside
-  the existing `paper` preset.
-- `scripts/move-quality.mjs` — paired cp-loss harness; `--grid` for the depth
-  re-measurement in Phase 1.1.
-- `scripts/strength-belief.mjs` — seat-swapped self-play harness; the
-  properly-powered run in Phase 2.
-- `src/stockfish.js` — the single-worker engine backend Phase 3.1 pools.
+- `vendor/obscuro/src/gtcfr.js`, `kluss.js`, `infoset.js`, `purify.js` — the
+  generic search's tree growth, safety gadget, CFR value propagation and
+  purification; the search-correctness fixes above live here.
+- `src/ObscuroAgent.js` — the chess leaf evaluator (`scoreChildren`,
+  `makeChessLeafEval`), difficulty scaling, the analysis panel's batched
+  population walk (`analyzeObscuroProgressive`), `CHESS_DIAL.leafEval.sfDepth`.
+- `src/exactBelief.js` — the exact position set P: representation, `CAP`,
+  `TIME_GUARD_MS`, `SAMPLE_ALPHA_DEFAULT`, re-acquisition.
+- `src/belief.js` — the heuristic particle-belief fallback.
+- `src/movePrior.js` — π(move | position): the fitted model, rating
+  conditioning, the uniform baseline.
+- `src/FogChess.js` — the game definition tying belief, prior and search
+  together; `beliefPopulation`/`enumerateWorlds` for the analysis panel.
+- `src/presets.js` — named configurations (the `paper` reference point; where
+  a "strongest" preset belongs).
+- `src/stockfish.js` — the engine backend; browser/Node dual-mode, the
+  single-worker bottleneck a pool would parallelize.
+- `scripts/move-quality.mjs` — paired cp-loss harness, incl. `--grid` for
+  depth measurements.
+- `scripts/strength-belief.mjs` — seat-swapped self-play strength harness.
+- `scripts/calibrate-belief.mjs`, `scripts/fit-move-prior.mjs`,
+  `scripts/adopt-corpus.mjs` — belief calibration, prior fitting, and the
+  one-command adoption pipeline.
 - `docs/PARAMETERS.md` — every constant named above, with its own citation;
-  update it alongside any constant this doc's phases change.
+  update it alongside any constant this doc's items change.

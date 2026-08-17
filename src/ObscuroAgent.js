@@ -909,7 +909,7 @@ function shuffledIndices(n, rng) {
 //     `total` is null, and a sweep is capped at a fixed batch count so the
 //     ladder can still climb.
 //
-// Aggregation (see OBSCURO-UNLIMITED-BELIEF-PLAN.md's "crux"): the cp EVAL per
+// Aggregation (see docs/STRENGTH-PLAN.md's analysis-panel section): the cp EVAL per
 // move is additive over worlds, so a MASS-weighted running mean — Σ(w·cp)/Σw over
 // each world's posterior probability, see cpSumsOverWorlds — converges to the
 // exact population expectation. The move PROBABILITY is an ensemble average of

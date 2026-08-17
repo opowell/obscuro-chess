@@ -6,7 +6,7 @@
 // Walks every recorded chess fog game in sessions/ from both seats, under each
 // prior below, and reports mean log-loss of the TRUE position against the
 // flat-posterior baseline log|P|. See beliefCalibration.js for what is measured
-// and why, and OBSCURO-MOVE-PRIOR-PLAN.md step 5 for the gate this decides:
+// and why, and docs/STRENGTH-PLAN.md for the gate this decides:
 //
 //   • uniform π must beat log|P| — otherwise the weight MECHANISM (colliding
 //     histories summing, branching factor, the observation filter) is worthless.

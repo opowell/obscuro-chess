@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // π(move | position) — the opponent-model that makes the belief a DISTRIBUTION
-// instead of a set. See OBSCURO-MOVE-PRIOR-PLAN.md.
+// instead of a set. See docs/STRENGTH-PLAN.md.
 //
 // exactBelief.js advances P one opponent ply by expanding every position by
 // every fog-legal opponent move. Without a model of how the opponent chooses,
@@ -47,7 +47,7 @@
 // over-weighting phantom attackers "hallucinates coordinated mating attacks and
 // the AI huddles instead of saving real material". A confident wrong belief is
 // worse than an honest vague one, so the defaults here are near-uniform and are
-// only justified by the log-loss numbers in OBSCURO-MOVE-PRIOR-PLAN.md — not by
+// only justified by the log-loss numbers in docs/STRENGTH-PLAN.md — not by
 // how reasonable they look.
 //
 // 2026-07-31 — THE WEIGHTS ARE NOW FITTED, NOT HAND-SET. The original model gave

@@ -280,7 +280,7 @@ export class Belief {
         //   3rkb1r/pppqpp2/6p1/8/1P1P3P/B4P2/PP1R1P2/3PKB2   (white pawn on d1)
         // which are ILLEGAL — and an illegal FEN makes the engine return zero
         // MultiPV lines, so every child of that node silently fell through to the
-        // static evaluator (see FOG-AI-FIX-PLAN.md, 2026-08-03).
+        // static evaluator (see docs/STRENGTH-PLAN.md, leaf-evaluation section).
         //
         // Excluding those squares keeps the set a valid SUPERSET of the truth,
         // because the truth could never be there: a pawn cannot occupy its own

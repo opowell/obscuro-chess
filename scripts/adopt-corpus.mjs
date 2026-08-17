@@ -216,9 +216,8 @@ console.log(`
       node scripts/move-quality.mjs --sessions ${corpus} --arm null    # control
       node scripts/strength-belief.mjs --arm alpha
 
-  The shipped α=0 was chosen against a mis-calibrated belief (see
-  docs/MOVE-PRIOR-PLAN.md), so it is a decision worth revisiting, not a settled
-  one.`);
+  Whether the shipped α is right is a decision worth revisiting against fresh
+  measurements (see docs/STRENGTH-PLAN.md), not a settled one.`);
 
 // --- write -------------------------------------------------------------------
 
@@ -230,7 +229,7 @@ if (has('write')) {
   rule('WRITING');
   fitter(['--folds', FOLDS, '--rating', '--write']);
   console.log('\nNow re-run `npm test`, and update the corpus provenance in');
-  console.log('docs/MOVE-PRIOR-PLAN.md and docs/PARAMETERS.md — the numbers above are');
+  console.log('docs/STRENGTH-PLAN.md and docs/PARAMETERS.md — the numbers above are');
   console.log('the ones to record.');
 } else {
   console.log('\n(Nothing was changed. Re-run with --write to ship the refit.)');

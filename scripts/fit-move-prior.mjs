@@ -13,8 +13,8 @@
 // divided by one temperature, and τ was chosen by sweeping it against the
 // belief's own log-loss. That is a one-parameter fit of a nine-parameter model,
 // and it left most of the signal on the floor: the terms want temperatures a
-// factor of ~6 apart, so no single τ can serve them (see OBSCURO-MOVE-PRIOR-PLAN
-// .md). This script fits all nine by maximum likelihood instead.
+// factor of ~6 apart, so no single τ can serve them (see docs/STRENGTH-PLAN.md).
+// This script fits all nine by maximum likelihood instead.
 //
 // THE MODEL IS A CONDITIONAL LOGIT, which is exactly what π already is:
 //

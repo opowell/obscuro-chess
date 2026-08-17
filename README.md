@@ -119,7 +119,7 @@ FITTED (shipped)   logloss 4.882  baseline log|P| 6.200  Δ 1.318  medRank  29
 own ordering. The shipped prior's weights were fitted by
 `scripts/fit-move-prior.mjs`, not hand-tuned — on 246 Chess.com Fog of War games
 by 192 players, which makes the run above (over three *other* games) an
-out-of-sample one. See [docs/MOVE-PRIOR-PLAN.md](docs/MOVE-PRIOR-PLAN.md) for
+out-of-sample one. See [docs/STRENGTH-PLAN.md](docs/STRENGTH-PLAN.md) for
 what the fit found: castling carries the model, and the one qualitative claim the
 earlier 37-game fit made — that fog players walk their kings out — turned out to
 be a single player's habit and vanished on the larger corpus.
