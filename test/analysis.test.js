@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FogChess } from '../src/FogChess.js';
 import { ChessAgent } from '../src/ChessAgent.js';
-import { analyzeObscuro, obscuroStrategy } from '../src/ObscuroAgent.js';
+import { analyzeObscuro, analyzeObscuroProgressive, obscuroStrategy } from '../src/ObscuroAgent.js';
 import { getBelief } from '../src/belief.js';
 import { ExactBelief, fromBoardObject } from '../src/exactBelief.js';
 import { getAllLegalMoves } from '../src/moves.js';
@@ -200,6 +200,136 @@ test('analyzeObscuroProgressive: a finite exact population exhausts and stops on
   assert.ok(frames.length >= 1 && frames.some(f => f.exhaustive), 'emits an exhaustive progress frame');
   const sum = r.candidates.reduce((a, c) => a + c.prob, 0);
   assert.ok(Math.abs(sum - 1) < 1e-6, `probabilities still sum to 1, got ${sum}`);
+});
+
+// ---------------------------------------------------------------------------
+// Resuming a walk that was stopped part-way (the analysis panel's Pause/Resume).
+// A caller that saved a cancelled walk's accumulator via opts.saveWalkState and
+// hands it back as opts.resumeState must see the walk CONTINUE — more batches
+// folded cumulatively into the running sums — rather than restart at batch 1
+// and re-price worlds it already scored.
+// ---------------------------------------------------------------------------
+
+// A belief wide enough that one batch cannot cover it: white is told its own
+// moves but not black's, so black's replies smear P across many boards. (At the
+// opening the position is common knowledge and the population is a single
+// world, which would exhaust before a resume could ever happen.)
+function widenedFogView() {
+  const g = fogGame();
+  // Prime the tracker at the opening, BEFORE any hidden move: the belief is
+  // built lazily on first ask, so a first ask made only at the end would sync a
+  // fresh one to the position then on screen — a single board — and none of the
+  // hidden replies would ever have been tracked.
+  g.belief('white');
+  g.play('white', 'e2', 'e4', { commit: true });
+  g.play('black', 'f7', 'f6');
+  g.play('white', 'g1', 'f3', { commit: true });
+  g.play('black', 'd7', 'd6');
+  const view = FogChess.getVisibleState(g.state, 'white');
+  const legal = FogChess.getLegalActions(g.state, 'white');
+  return { view, legal, pop: FogChess.beliefPopulation(view, 'white') };
+}
+
+// An isCancelled/onProgress pair that stops the walk after exactly `n` more
+// completed batches.
+function stopAfterBatches(n) {
+  let seen = 0;
+  return {
+    isCancelled: () => seen >= n,
+    onProgress: (info) => { if (info.kind === 'batch') seen = info.batch; },
+  };
+}
+
+test('analyzeObscuroProgressive: resuming continues the walk instead of restarting it', async () => {
+  const { view, legal, pop } = widenedFogView();
+  assert.ok(pop.exact && pop.total > 4, `fixture needs a population wider than one batch, got ${pop.total}`);
+
+  const baseOpts = {
+    color: 'white', rng: () => 0.5,
+    cpEval: () => null,  // no Stockfish — keeps this deterministic and fast
+    maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 4, maxSfDepth: 1,
+  };
+
+  // First call: run exactly one batch, then keep its saved accumulator.
+  let saved = null;
+  const r1 = await analyzeObscuroProgressive(view, legal, {
+    ...baseOpts, ...stopAfterBatches(1), saveWalkState: (ws) => { saved = ws; },
+  });
+  assert.equal(r1.batches, 1);
+  assert.ok(saved, 'a completed batch must save resumable state');
+  assert.equal(saved.batches, 1);
+  assert.equal(saved.cursor, 4, 'the snapshot records how far into the population it got');
+
+  // A FRESH second call (no resumeState) starts the walk over at batch 1 —
+  // the behaviour a naive "Resume" gets, and the thing being fixed.
+  const rFresh = await analyzeObscuroProgressive(view, legal, { ...baseOpts, ...stopAfterBatches(1) });
+  assert.equal(rFresh.batches, 1, 'without resumeState, a new call restarts the walk at batch 1');
+  assert.equal(rFresh.evaluated, r1.evaluated, 'a fresh walk re-evaluates the same first-batch work');
+
+  // A RESUMED second call continues from batch 1 to batch 2 instead.
+  const rResumed = await analyzeObscuroProgressive(view, legal, {
+    ...baseOpts, ...stopAfterBatches(1), resumeState: saved,
+  });
+  assert.equal(rResumed.batches, 2, 'resuming continues the batch count instead of restarting at 1');
+  assert.equal(rResumed.evaluated, r1.evaluated * 2, 'resuming accumulates evaluated worlds instead of resetting');
+});
+
+// The snapshot is only honoured for the walk it was taken from. A population of
+// a different size means the position moved underneath the cache, and folding
+// its aggregates into this one would mix two positions' answers together.
+test('analyzeObscuroProgressive: a resume snapshot from a different position is ignored', async () => {
+  const { view, legal, pop } = widenedFogView();
+  const baseOpts = {
+    color: 'white', rng: () => 0.5, cpEval: () => null,
+    maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 4, maxSfDepth: 1,
+  };
+
+  let saved = null;
+  await analyzeObscuroProgressive(view, legal, {
+    ...baseOpts, ...stopAfterBatches(1), saveWalkState: (ws) => { saved = ws; },
+  });
+
+  // Same shape, wrong walk: a population one world larger than this one.
+  const foreign = { ...saved, order: [...saved.order, pop.total] };
+  const r = await analyzeObscuroProgressive(view, legal, {
+    ...baseOpts, ...stopAfterBatches(1), resumeState: foreign,
+  });
+  assert.equal(r.batches, 1, 'a mismatched population starts a fresh walk rather than resuming');
+
+  // Same walk, but a ladder of a different height — each rung means something
+  // different, so this is not the same walk either.
+  const otherLadder = { ...saved, maxDepth: saved.maxDepth + 1 };
+  const r2 = await analyzeObscuroProgressive(view, legal, {
+    ...baseOpts, ...stopAfterBatches(1), resumeState: otherLadder,
+  });
+  assert.equal(r2.batches, 1, 'a different ladder height starts a fresh walk too');
+});
+
+// Regression: resuming an ALREADY-EXHAUSTED walk (the population was fully
+// covered before Pause — the panel showing "All N worlds evaluated") must still
+// hand back that settled result. The rung's first exhaustion check breaks before
+// running any batch, so the result has to be seeded from the resumed aggregates
+// up front; otherwise a resumed panel wipes a settled answer to "No suggestions."
+test('analyzeObscuroProgressive: resuming an already-exhausted walk still returns its settled result', async () => {
+  const players = [{ id: 'white' }, { id: 'black' }];
+  const state = FogChess.createInitialState(players, { fogOfWar: true, difficulty: 30 });
+  const view = FogChess.getVisibleState(state, 'white');
+  const legal = FogChess.getLegalActions(state, 'white');
+
+  const opts = {
+    color: 'white', rng: () => 0.5, isCancelled: () => false, cpEval: () => null,
+    maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 8, maxSfDepth: 1,
+  };
+  let saved = null;
+  const r1 = await analyzeObscuroProgressive(view, legal, { ...opts, saveWalkState: (ws) => { saved = ws; } });
+  assert.equal(r1.exhaustive, true, 'the (single-world, opening) population is covered in one batch');
+  assert.ok(saved, 'an exhaustive walk still saves its final accumulator');
+
+  const rResumed = await analyzeObscuroProgressive(view, legal, { ...opts, resumeState: saved });
+  assert.ok(rResumed, 'resuming an already-exhausted walk must not return null');
+  assert.equal(rResumed.exhaustive, true);
+  assert.ok(rResumed.candidates.length > 0, 'the settled candidates are returned, not wiped to empty');
+  assert.deepEqual(rResumed.candidates, r1.candidates, 'a no-op resume leaves the settled answer unchanged');
 });
 
 // Prompt cancellation (the memory-leak guard): when the analysis position

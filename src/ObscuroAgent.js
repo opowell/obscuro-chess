@@ -962,6 +962,25 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   const pop = game.beliefPopulation(state, me);
   const total = pop.exact ? pop.total : null;
 
+  // ── resuming a walk that was stopped part-way ─────────────────────────────
+  // A caller that saved a cancelled walk's accumulator (opts.saveWalkState
+  // below) can hand it back as opts.resumeState, and the walk picks up where it
+  // stopped instead of re-pricing worlds it already scored. This is what lets
+  // the analysis panel's Pause be a pause rather than an abandonment: on a wide
+  // belief population, restarting at world 0 is most of the wait, twice.
+  //
+  // Only trusted when the snapshot describes the SAME walk — the same kind of
+  // population and, when exact, the same size (a different size means the
+  // position moved underneath the cache), and the same ladder height, since
+  // maxDepth decides what each rung means and where exhaustion sits. Anything
+  // else falls back to a fresh walk rather than mixing aggregates taken from a
+  // different position.
+  const rs = (opts.resumeState
+    && opts.resumeState.maxDepth === maxDepth
+    && opts.resumeState.exact === pop.exact
+    && (!pop.exact || opts.resumeState.order?.length === pop.total))
+    ? opts.resumeState : null;
+
   // ── the per-world view (see buildBeliefWorlds) ────────────────────────────
   // Everything above collapses the belief population into ONE ranked move list.
   // The panel additionally lets a viewer look at the population itself: step
@@ -983,8 +1002,14 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   // prefer heaviest-first (see weightOrder); a random permutation is the fallback
   // when there is no posterior to sort by (perfect information, where the
   // population is a single world anyway, or a game whose belief exposes none).
+  // A resumed walk keeps the permutation it started with: `cursor` is an index
+  // INTO this array, so re-deriving the order would leave the saved cursor
+  // pointing at different worlds — silently skipping part of the population and
+  // re-pricing another part. (weightOrder is deterministic given the same
+  // posterior, but shuffledIndices is not, and neither guarantee is worth
+  // relying on when the array itself is right there in the snapshot.)
   const order = pop.exact
-    ? (weightOrder(ranked?.probs, pop.total) ?? shuffledIndices(pop.total, rng))
+    ? (rs?.order ?? weightOrder(ranked?.probs, pop.total) ?? shuffledIndices(pop.total, rng))
     : null;
 
   // The most-likely boards, materialised once: they don't depend on the
@@ -1001,21 +1026,26 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   // priced at the current rung. Rebuilt per rung like the cp aggregates, so
   // every cp in it was searched to the same depth and the "best world for this
   // move" ordering compares like with like.
-  let scoredWorlds = new Map();
-  let settledWorlds = new Map();
+  // Every one of these is seeded from the resume snapshot when there is one, and
+  // COPIED out of it rather than aliased: the snapshot the caller holds must stay
+  // the state as of a completed batch, and these keep mutating as the walk runs
+  // on (a batch cancelled half-way through still writes into them before it
+  // breaks — see the cp fold below).
+  let scoredWorlds = rs ? new Map(rs.scoredWorlds) : new Map();
+  let settledWorlds = rs ? new Map(rs.settledWorlds) : new Map();
 
   // Mixing aggregate — accumulated across every batch of NEW worlds (see above),
   // each weighted by the batch's posterior MASS rather than its world count, so a
   // batch of near-impossible worlds doesn't get an equal vote in the ensemble.
-  const probSum = new Map(); let probW = 0;
+  const probSum = rs ? new Map(rs.probSum) : new Map(); let probW = rs?.probW ?? 0;
   // Eval aggregate — rebuilt from scratch at each rung of the ladder. `cpMass` is
   // the denominator of the weighted mean (Σ w, not a world count). `settledCp`
   // holds the deepest rung that actually produced numbers, so the eval column
   // never blanks out while a deeper rung is still being computed (or is being
   // abandoned because the engine can't reach it inside the budget).
-  let cpSum = new Map(), cpMass = new Map();
-  const settledCp = new Map();
-  let settledDepth = 0;
+  let cpSum = rs ? new Map(rs.cpSum) : new Map(), cpMass = rs ? new Map(rs.cpMass) : new Map();
+  const settledCp = rs ? new Map(rs.settledCp) : new Map();
+  let settledDepth = rs?.settledDepth ?? 0;
 
   // Nothing hidden (population of exactly one world) makes the mixing degenerate
   // — purification commits to a single move, so every other move sits at 0% and
@@ -1068,17 +1098,46 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
     };
   };
 
-  let batches = 0, last = null, covered = false, settledCovered = false;
+  let batches = rs?.batches ?? 0, last = null;
+  let covered = rs?.covered ?? false, settledCovered = rs?.settledCovered ?? false;
+
+  // A resumed walk can legitimately do no further work at all — it was already
+  // exhausted when it stopped, or it is cancelled again before the first batch
+  // completes — and the loops below only ever assign `last` from a batch they
+  // actually ran. Seed it from the resumed aggregates so those cases hand back
+  // the answer the walk had already reached, instead of the empty no-candidates
+  // result that would wipe a settled panel back to "No suggestions."
+  if (rs) {
+    last = {
+      engine: 'obscuro', mode: state.gameSpecific.fogOfWar ? 'cfr' : 'minimax',
+      candidates: buildCandidates(), depth: rs.depth, maxDepth,
+      batches, evaluated: rs.evaluated, total,
+      exhaustive: covered && (rs.depth >= maxDepth || !cpEval) && pop.exact,
+    };
+  }
+
   // The likely boards need nothing from the engine, so hand them over before
   // the first batch's CFR solve + leaf eval (seconds, on a large population)
   // rather than making the viewer stare at bare fog until then.
   if (likelyWorlds.length) opts.onProgress?.({ kind: 'belief', total, beliefWorlds: buildBeliefWorlds() });
-  for (let depth = 1; depth <= maxDepth; depth++) {
+  // `resuming` is spent on the first rung it reaches — only the rung the walk
+  // stopped inside keeps its partial aggregates; every rung after it starts
+  // clean, exactly as an unresumed walk does.
+  let resuming = !!rs;
+  for (let depth = rs?.depth ?? 1; depth <= maxDepth; depth++) {
     // A fresh rung: previous depths' evals are superseded, not blended into.
-    cpSum = new Map(); cpMass = new Map();
-    scoredWorlds = new Map();
-    let cursor = 0, evaluated = 0, sweepCount = 0, rungCp = 0;
-    covered = false;
+    // The resumed rung is not fresh — it is the one that was interrupted, and
+    // its cp aggregates and scored worlds are the ones restored above.
+    if (!resuming) {
+      cpSum = new Map(); cpMass = new Map();
+      scoredWorlds = new Map();
+    }
+    let cursor = resuming ? rs.cursor : 0;
+    let evaluated = resuming ? rs.evaluated : 0;
+    let sweepCount = resuming ? rs.sweepCount : 0;
+    let rungCp = resuming ? rs.rungCp : 0;
+    if (!resuming) covered = false;
+    resuming = false;
     // Every batch of NEW worlds contributes its equilibrium once; the exact
     // population is only new on the first sweep.
     const foldProb = !pop.exact || depth === 1;
@@ -1176,6 +1235,19 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
       const belief = (batches === 1 || covered || batches % 8 === 0) ? buildBeliefWorlds() : null;
       opts.onProgress?.({ kind: 'batch', depth, maxDepth, batch: batches, evaluated, total, exhaustive, candidates,
         ...(belief ? { beliefWorlds: belief } : {}) });
+      // Only ever a FULLY completed batch — the cancellation checks above bail
+      // out before this point, so a walk resumed from this snapshot never
+      // double-counts a world or skips one. The maps are copied on the way out
+      // for the same reason they are copied on the way in: the walk keeps
+      // running after this call, and a snapshot that aliased them would drift.
+      opts.saveWalkState?.({
+        exact: pop.exact, maxDepth, order,
+        depth, cursor, evaluated, sweepCount, rungCp, covered, batches,
+        probSum: new Map(probSum), probW,
+        cpSum: new Map(cpSum), cpMass: new Map(cpMass),
+        settledCp: new Map(settledCp), settledDepth, settledCovered,
+        settledWorlds: new Map(settledWorlds), scoredWorlds: new Map(scoredWorlds),
+      });
       if (covered) break; // sweep complete — climb to the next rung
     }
 
