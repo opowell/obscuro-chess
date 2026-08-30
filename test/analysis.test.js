@@ -305,6 +305,41 @@ test('analyzeObscuroProgressive: a resume snapshot from a different position is 
   assert.equal(r2.batches, 1, 'a different ladder height starts a fresh walk too');
 });
 
+// The invariant the whole feature rests on: however often the walk is stopped
+// and resumed, the population is covered EXACTLY once. A resume that re-walked
+// worlds would inflate `evaluated` past the population (and double-count them
+// into the mixing); one that skipped worlds would never reach exhaustion. This
+// pauses after every single batch — the worst case, and what a viewer leaning
+// on the Pause button actually produces.
+test('analyzeObscuroProgressive: pausing after every batch still covers the population exactly once', async () => {
+  const { view, legal, pop } = widenedFogView();
+  const baseOpts = {
+    color: 'white', rng: () => 0.5, cpEval: () => null,
+    maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 4, maxSfDepth: 1,
+  };
+
+  let saved = null, r = null, calls = 0;
+  while (calls < 40) {
+    calls++;
+    let batchesThisCall = 0;
+    r = await analyzeObscuroProgressive(view, legal, {
+      ...baseOpts,
+      isCancelled: () => batchesThisCall >= 1,
+      onProgress: (info) => { if (info.kind === 'batch') batchesThisCall++; },
+      resumeState: saved ?? undefined,
+      saveWalkState: (ws) => { saved = ws; },
+    });
+    if (r.exhaustive) break;
+  }
+
+  assert.equal(r.exhaustive, true, `the walk settles despite being paused ${calls} times`);
+  assert.equal(r.evaluated, pop.total,
+    `every world priced exactly once: evaluated ${r.evaluated} of a population of ${pop.total}`);
+  assert.ok(calls > 1, 'the fixture really did need more than one call to finish');
+  const sum = r.candidates.reduce((a, c) => a + c.prob, 0);
+  assert.ok(Math.abs(sum - 1) < 1e-6, `the mixing is still a distribution, got ${sum}`);
+});
+
 // Regression: resuming an ALREADY-EXHAUSTED walk (the population was fully
 // covered before Pause — the panel showing "All N worlds evaluated") must still
 // hand back that settled result. The rung's first exhaustion check breaks before
