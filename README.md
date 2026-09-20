@@ -57,6 +57,35 @@ number is documented in [docs/PARAMETERS.md](docs/PARAMETERS.md), and the generi
 search's own knobs upstream in
 [vendor/obscuro/docs/PARAMETERS.md](vendor/obscuro/docs/PARAMETERS.md).
 
+## Play it in Battle Simulator
+
+[Battle Simulator](https://github.com/opowell/battle-simulator) is the game
+engine this AI was built for. It vendors this repository at `vendor/obscuro-chess`
+and hands the search its own chess definition with `setGame`, so nothing here
+needs installing separately:
+
+```bash
+git clone --recurse-submodules https://github.com/opowell/battle-simulator.git
+cd battle-simulator
+node api-server.js       # prints the URL; the UI is at <that URL>/ui/design
+```
+
+Pick **Chess → Fog of War**. That scenario seats you against this AI, and the
+setup form's difficulty slider is the `difficulty` dial above. Any other setup
+works too: turn on **Fog of War** and give a seat the **AI (Obscuro/CFR)** agent.
+
+Battle Simulator is itself an app for [JAS](https://github.com/opowell/jas), a
+local server that hosts web apps from its `apps/` folder. Clone it there,
+start JAS with `./jas.sh`, and it appears in the Launchpad at
+`http://localhost:4500` — everything above, one click in.
+
+To pull a newer version of this AI into Battle Simulator:
+
+```bash
+git submodule update --remote vendor/obscuro-chess
+git add vendor/obscuro-chess && git commit
+```
+
 ## Settings
 
 Any of those numbers can be **fixed**, so the dial stops moving it — or the
