@@ -388,6 +388,50 @@ test('obscuroStrategy: isCancelled cuts the CFR round loop short', async () => {
   stockfishQuit();
 });
 
+// From a real game (fog-chess, 2026-09-29). Black's h-rook was taken on e5, so
+// the king left e8 — by O-O, or by Kd7 — and about half of white's belief has it
+// on d7. With the search's generic ±10⁶ terminal the Resolve gadget chased
+// those worlds and gave Bf3–c6 (which hangs the bishop to b×c6 / K×c6 in every
+// world) ~40% of the strategy, purified to 100%. With the agent's bounded
+// SEARCH_WIN it is never played.
+test('obscuroStrategy: a king that may be capturable does not buy a bishop sacrifice', async () => {
+  // White's belief is kept the way a host keeps a human seat's: advanced at
+  // each turn start, told white's own move, and shown what that move revealed.
+  let st = FogChess.createInitialState([{ id: 'white' }, { id: 'black' }], { fogOfWar: true, difficulty: 30 });
+  const play = (color, key) => {
+    const action = FogChess.getLegalActions(st, color).find(a => FogChess.actionKey(a) === key);
+    assert.ok(action, `${color} can play ${key}`);
+    if (color === 'white') {
+      const view = FogChess.getVisibleState(st, 'white');
+      FogChess.beliefPopulation(view, 'white');
+      FogChess.onActionCommitted(view, 'white', action);
+    }
+    st = FogChess.applyActions(st, [{ playerId: color, action }]);
+    if (color === 'white') FogChess.onActionObserved(FogChess.getVisibleState(st, 'white'), 'white');
+  };
+  const W = 'b2b4 e2e3 f2f4 a2a3 b4b5 a3a4 c1b2 h2h3 f1e2 e2f3 g2g4 f4e5 b2e5 b1c3'.split(' ');
+  const B = 'd7d5 b8d7 g8f6 a7a5 d7b6 e7e6 f8d6 e8d7 h8e8 a8a7 e6e5 e8e5 d6e5 d5d4'.split(' ');
+  W.forEach((w, i) => { play('white', w); play('black', B[i]); });
+  const view = FogChess.getVisibleState(st, 'white');
+  const legal = FogChess.getLegalActions(st, 'white');
+  const pop = FogChess.beliefPopulation(view, 'white');
+  assert.ok(pop.exact, 'the belief is still exact');
+  // The analysis's first batch: the 16 likeliest worlds.
+  const ranked = FogChess.rankBeliefWorlds(view, 'white', 1);
+  const order = [...Array(pop.total).keys()].sort((a, b) => ranked.probs[b] - ranked.probs[a]);
+  const worlds = FogChess.enumerateWorlds(view, 'white', order.slice(0, 16));
+  assert.ok(worlds.some(w => w.board.d7?.type === 'king'), 'some worlds have the king on d7');
+
+  let seed = 1;
+  const rng = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (let run = 0; run < 3; run++) {
+    const r = await obscuroStrategy(view, legal, { worlds, color: 'white', rng, maxRounds: 100, expandPerRound: 16, cfrPerRound: 8 });
+    const bc6 = r.rows.findIndex(a => a.from === 'f3' && a.to === 'c6');
+    assert.ok((r.dist[bc6] ?? 0) < 0.05, `run ${run}: Bf3–c6 gets ${Math.round((r.dist[bc6] ?? 0) * 100)}%`);
+  }
+  stockfishQuit();
+});
+
 // ---------------------------------------------------------------------------
 // The per-world view: showing a human WHICH boards the fog could be hiding, not
 // just the averaged move ranking derived from them. See ExactBelief

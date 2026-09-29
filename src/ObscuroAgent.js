@@ -757,8 +757,14 @@ export async function obscuroStrategy(state, legalActions, opts = {}) {
   let worlds = opts.worlds ?? (fog ? game.sampleWorlds(state, me, opts.particles ?? analysisDefaults().strategy.particles, rng) : null);
   if (!worlds || worlds.length === 0) worlds = [state];
 
-  const hooks = makeHooks(game, me, { rng });
-  const opp = (state.players ?? []).find(p => p.id !== me)?.id ?? null;
+  // The same bounded terminal the agent searches with (_winValue). FogChess
+  // declares no winValue, so without it the search falls back to the generic
+  // ±10⁶ — exactly the unbounded win SEARCH_WIN exists to prevent: the Resolve
+  // gadget then chases whichever belief world leaves the enemy king capturable,
+  // and the analysis ranked a bishop sacrifice first (97%) in a position where
+  // the agent itself would never play it.
+  const hooks = makeHooks(game, me, { rng, win: searchWin() });
+  const opp =(state.players ?? []).find(p => p.id !== me)?.id ?? null;
   // Live "round N/M" progress (lichess-style depth ticks, but for CFR rounds) —
   // purely a side channel; see runObscuroSearch's cfg.onRound.
   const onRound = opts.onProgress
