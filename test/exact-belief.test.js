@@ -366,3 +366,43 @@ test('belief: a contradicted piece falls back to TYPE-LEGAL squares only', async
   delete bad.e8;
   assert.match(impossiblePlacement(bad) ?? '', /black has 0 kings/);
 });
+
+test('exact belief: what our own move reveals is kept after the reply hides it', () => {
+  // 1.f4 e5 2.b3 Nc6 3.Bb2 Bd6 4.fxe5 Nxe5: the capture on e5 shows White the
+  // bishop on d6, then the knight takes the pawn that was seeing it. Bb2 sees the
+  // knight land, so only a knight moved, and at White's 5th turn the bishop must
+  // still be on d6.
+  const plies = [['white', 'f2', 'f4'], ['black', 'e7', 'e5'], ['white', 'b2', 'b3'],
+    ['black', 'b8', 'c6'], ['white', 'c1', 'b2'], ['black', 'f8', 'd6'],
+    ['white', 'f4', 'e5'], ['black', 'c6', 'e5']];
+  const run = (observeAfter) => {
+    let state = FogChess.createInitialState(
+      [{ id: 'white', name: 'W' }, { id: 'black', name: 'B' }],
+      { fogOfWar: true, fog: true });
+    for (const [pid, from, to] of plies) {
+      const action = FogChess.getLegalActions({ ...state, activePlayers: [pid] }, pid)
+        .find(a => a.from === from && a.to === to);
+      assert.ok(action, `${from}-${to} is legal`);
+      if (pid === 'white') {
+        const obs = FogChess.getVisibleState(state, 'white');
+        FogChess.beliefPopulation(obs, 'white');
+        FogChess.onActionCommitted(obs, 'white', action);
+      }
+      state = FogChess.applyActions(state, [{ playerId: pid, action }]);
+      if (pid === 'white' && observeAfter) {
+        FogChess.onActionObserved(FogChess.getVisibleState(state, 'white'), 'white');
+      }
+    }
+    const obs = FogChess.getVisibleState(state, 'white');
+    assert.equal(obs.board.d6, undefined, 'd6 is dark again');
+    assert.equal(obs.board.e5?.type, 'knight', 'and the knight on e5 is in view');
+    const { exact, total } = FogChess.beliefPopulation(obs, 'white');
+    assert.ok(exact, 'the tracker is still exact');
+    const worlds = FogChess.enumerateWorlds(obs, 'white', Array.from({ length: total }, (_, i) => i));
+    return worlds.map(w => w.board.d6?.type === 'bishop' && w.board.d6.ownerId === 'black');
+  };
+  const without = run(false);
+  assert.ok(without.some(onD6 => !onD6), 'turn starts alone lose the bishop');
+  const withIt = run(true);
+  assert.ok(withIt.length > 0 && withIt.every(Boolean), 'every world has the bishop on d6');
+});

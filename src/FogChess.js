@@ -552,6 +552,15 @@ export const FogChess = {
     getExactBelief(observation, playerId).commitOurMove(action);
     getBelief(observation, playerId).commitOurMove(action, observation.board);
   },
+
+  // Let the exact tracker see the position our move produced (the observation
+  // taken after applyActions, before the opponent replies). What the move
+  // revealed is kept, even if the reply hides it again. Only the exact tracker
+  // takes it; the particle belief still sees turn starts only.
+  onActionObserved(observation, playerId) {
+    if (!observation.gameSpecific.fogOfWar) return;
+    getExactBelief(observation, playerId).observeAfterOurMove(observation);
+  },
 };
 
 export default FogChess;

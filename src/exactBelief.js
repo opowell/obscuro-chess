@@ -809,6 +809,30 @@ export class ExactBelief {
     this._setWeights(nextW);
   }
 
+  /**
+   * Filter P against what we see right after our own move, before the opponent
+   * replies. Our move can reveal squares (a capture opens a pawn's diagonals, a
+   * piece steps out of a line) that the opponent's reply then hides again, and
+   * beginTurn only ever checks the view at the start of our next turn. Without
+   * this, P forgets anything seen in between: a bishop revealed on d6 by our
+   * fxe5, which the opponent answers with Nxe5, could be anywhere again.
+   * Idempotent, like any filter; call it after commitOurMove, with the
+   * observation of the position the move produced.
+   */
+  observeAfterOurMove(observation) {
+    if (!this.exact || !this.positions) return;
+    const ctx = obsContext(observation, this.mySign);
+    const kept = [], keptW = [];
+    for (let i = 0; i < this.positions.length; i++) {
+      if (!consistent(ctx, this.positions[i])) continue;
+      kept.push(this.positions[i]);
+      keptW.push(this.weights ? this.weights[i] : 1);
+    }
+    this.positions = kept;
+    if (kept.length === 0) { this._giveUp(); return; }
+    this._setWeights(keptW);
+  }
+
   // One opponent ply: successors of every position under every fog-legal
   // opponent move, minus impossibilities (king captured / no move available),
   // filtered INLINE against the current observation.
