@@ -20,8 +20,9 @@
 //     pseudo-legal, and a player's action set depends only on its own
 //     observation — which is what lets every position in one information set
 //     share one action set (see the note on getLegalActions).
-//   • A move can FAIL: a pawn push onto a square that turned out to be occupied
-//     leaves the pawn where it was and ends the turn.
+//   • A pawn cannot push onto a dark square. The square ahead of a pawn is lit
+//     exactly when it is empty, so a dark one always holds a piece the pawn
+//     cannot see; the push is not offered (see getLegalActions).
 //   • 100 half-moves without a capture or pawn move is a draw.
 //
 // This file is a self-contained implementation of the rules and the belief
@@ -40,6 +41,14 @@ import { getBelief, impossiblePlacement } from './belief.js';
 import { getExactBelief, getBeliefReachWeighting, getBeliefSampleAlpha } from './exactBelief.js';
 import { DEFAULT_DIFFICULTY } from './stockfish.js';
 import { param } from './config.js';
+
+// A straight pawn move: not a capture, not en passant. The only kind of move
+// whose destination can be dark (every other piece sees each square it can
+// move to).
+function isPawnPush(board, action) {
+  return action.type !== 'castle' && board[action.from]?.type === 'pawn'
+    && !action.isCapture && !action.isEnPassant;
+}
 
 // ---------------------------------------------------------------------------
 // Initial board setup
@@ -150,9 +159,24 @@ export const FogChess = {
   },
 
   getLegalActions(state, playerId) {
-    return state.gameSpecific.fogOfWar
-      ? getAllFogMoves(state.board, playerId, state.gameSpecific)
-      : getAllLegalMoves(state.board, playerId, state.gameSpecific);
+    if (!state.gameSpecific.fogOfWar) return getAllLegalMoves(state.board, playerId, state.gameSpecific);
+    const actions = getAllFogMoves(state.board, playerId, state.gameSpecific);
+    // An observation has the hidden pieces stripped from its board, so a pawn
+    // blocked by one looks free to push. It is not: getVisibleSquares lights the
+    // square ahead of a pawn (and the one beyond, for a double push) only while
+    // it is empty, so a push onto a dark square always runs into a piece. Were
+    // it offered, it could only ever fail, and nothing downstream models a move
+    // that fails — the exact belief never generates it for the opponent and
+    // applies it as played for us, so it would silently lose the true position
+    // on both sides, and the leaf evaluator, whose engine cannot play it in any
+    // world, priced it with the static evaluator and made a wasted turn look as
+    // good as a real move. Dropping it makes the observation's action set equal
+    // to what move generation gives on every full board consistent with it.
+    // (A full board — a belief world — needs no filter: its move generation
+    // already sees the blocker.)
+    if (!state.visibleSquares || state.viewerId !== playerId) return actions;
+    const visible = new Set(state.visibleSquares);
+    return actions.filter(a => !isPawnPush(state.board, a) || visible.has(a.to));
   },
 
   // NOTE: there is deliberately NO getSearchLegalActions here. The search tree
@@ -190,15 +214,13 @@ export const FogChess = {
       // The action set is generated once against the mover's OWN (fog-limited)
       // view of the board and then replayed against many hidden-state worlds
       // during search/analysis (see the "NO getSearchLegalActions" note above).
-      // Those can disagree: a pawn push whose target square looked empty to the
-      // mover (a blocked push square stays deliberately hidden — see
-      // getVisibleSquares in board.js) can turn out to be occupied in a
-      // specific sampled world. Blindly relocating the piece there would
-      // fabricate an illegal capture (pawns can't capture by pushing straight)
-      // and hand the leaf evaluator a position that could never occur — inflate
-      // its score enough and it gets suggested as the best move. Treat that
-      // case as the real move failing instead: the piece stays put and nothing
-      // else about the position changes.
+      // getLegalActions no longer offers a push onto a dark square, so for its
+      // own actions a push target is empty in every world consistent with the
+      // observation. An embedder's action set may still contain one, or a world
+      // may be a heuristic particle that does not match the observation; then
+      // relocating the piece would fabricate an illegal capture (pawns can't
+      // capture by pushing straight) and hand the leaf evaluator a position
+      // that could never occur. Leave the piece where it is instead.
       let blockedHere = !action.isCapture && !action.isEnPassant && board[action.to] != null;
       // A double push can ALSO fail on the square it jumps over (the pawn can't
       // see past a blocker there either, per getVisibleSquares) even when the
@@ -235,8 +257,13 @@ export const FogChess = {
       }
     }
 
+    // What a player could see belongs to the position it was computed on. A
+    // world built from an observation carries that observation's fields, and
+    // passing them on would hand the next position a stale view, which
+    // getLegalActions would then filter the same player's moves against.
+    const { visibleSquares, viewerId, ...rest } = state;
     return {
-      ...state,
+      ...rest,
       board,
       units: boardToUnits(board),
       activePlayers: [opponent],

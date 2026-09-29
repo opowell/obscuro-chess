@@ -298,6 +298,31 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
       }
     }
     if (pv && pv.length && cpByIdx.size < need.length) leafStats.unmappedNodes++;
+    // Moves the engine did not list for the parent, because standard chess has
+    // no such move: castling through an attacked square (legal under fog), or a
+    // push this world's board blocks (an embedder's action set can hold one;
+    // applyActions leaves the pawn where it was). Each child is still an
+    // ordinary position with the opponent to move, so ask the engine about the
+    // child itself, as the refused-parent path above does. The static evaluator
+    // they used to fall back to counts material with no search and no tempo, on
+    // a different scale, and it made a push that only wastes the turn score
+    // level with real moves.
+    if (pv && pv.length && !truncated) {
+      const side = them === 'white' ? 'w' : 'b';
+      const unpriced = need.filter(i => !cpByIdx.has(i)).slice(0, refusedChildCap());
+      for (const i of unpriced) {
+        const cs = childStates[i];
+        if (engineWouldRefuse(cs.board, them)) continue;
+        let childPv = null;
+        try {
+          childPv = await multiPV(toFEN(cs.board, cs.gameSpecific, side, cs.turnNumber ?? 1),
+            { multipv: 1, depth: sfDepth, isCancelled, onStopped: () => { truncated = true; } });
+        } catch { childPv = null; }
+        if (truncated) break;
+        if (childPv?.length && typeof childPv[0].cp === 'number') cpByIdx.set(i, -childPv[0].cp);
+      }
+      if (truncated) engineOk = false;
+    }
     if (process.env?.OBSCURO_DEBUG_FALLBACK && cpByIdx.size < need.length
         && leafStats.calls % Number(process.env.OBSCURO_DEBUG_FALLBACK || 1) === 0) {
       const side = mover === 'white' ? 'w' : 'b';
