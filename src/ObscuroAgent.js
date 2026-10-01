@@ -1124,6 +1124,9 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
       // present these boards as certainties, and its weights are uniform rather
       // than a posterior (see ExactBelief.rankByLikelihood).
       approx: ranked?.approx ?? null,
+      // A resampled population (P outgrew its cap): real boards, estimated
+      // probabilities, and covering it all is not covering every possibility.
+      sampled: !!pop.sampled,
       moves: legalActions.map(k),
       worlds: [...byId.values()],
     };

@@ -414,7 +414,7 @@ export const FogChess = {
       const idx = exact.sampleIndices(n, rng);
       const picks = idx && exact.positionsAt(idx);
       if (picks && picks.length) {
-        const source = exact.approx ? 'exact(reacquired)' : 'exact';
+        const source = exact.approx ? 'exact(reacquired)' : exact.sampled ? 'exact(sampled)' : 'exact';
         // Fall back to the CONFIGURED α, not to a literal. A tracker always sets
         // `_alpha` at construction so this should never fire, but the literal 0
         // that used to be here silently meant "paper behaviour" the moment the
@@ -475,7 +475,7 @@ export const FogChess = {
     belief.beginTurn(observation.board, turnKey);
     if (!exact.exact) exact.tryReacquire(observation, belief, turnKey);
     return (exact.exact && exact.positions?.length)
-      ? { exact: true, total: exact.positions.length }
+      ? { exact: true, total: exact.positions.length, sampled: !!exact.sampled }
       : { exact: false, total: null };
   },
 

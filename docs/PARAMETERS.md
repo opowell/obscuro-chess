@@ -128,14 +128,15 @@ setting:
 Two trackers, always kept in lockstep (`ChessGame.sampleWorlds`): the **exact**
 position-set tracker `P` (`exactBelief.js`) is preferred and, while it holds,
 *is* the paper's belief; the **heuristic particle** tracker (`belief.js`) is
-the fallback once exactness is lost (P outgrew its cap, a time guard tripped,
-or the tracker was attached mid-game).
+the fallback once exactness is lost (a time guard tripped, a resampled P lost
+the true position, or the tracker was attached mid-game). P outgrowing its cap
+no longer loses it: P is resampled instead (see `CAP`).
 
 **Exact belief (`src/exactBelief.js`)**
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `CAP` | 200,000 | max `\|P\|` before exactness is abandoned (paper: usually ≤ 10⁶ in C++; this tracker averages ~17k) |
+| `CAP` | 200,000 | max `\|P\|` held. When an opponent ply would exceed it, P is resampled (systematic resampling, unbiased per position) down to `CAP/2` and tracking continues, flagged `sampled` (paper: usually ≤ 10⁶ in C++; this tracker averages ~17k) |
 | `TIME_GUARD_MS` | 4000 | per-turn update budget; exceeding it also abandons exactness |
 | `REACQUIRE_BOUND` | 60,000 | max cross-product size `tryReacquire` will search when trying to rebuild a lost `P` from the heuristic belief |
 | `SAMPLE_ALPHA_DEFAULT` | 0 | exponent applied to the posterior when *sampling* search worlds (`draw ∝ w^α`). **Ships at 0 (uniform over P), deliberately ignoring the posterior**, and as of 2026-08-11 that is measured rather than assumed: **+0.21 ± 1.08 cp (z = 0.20), sign test 48.8%** over 4,124 paired holdout positions, on the first harness whose null control holds (see `FRESH_HASH`). Flat. α=1 measured *better* sample coverage (39.3% vs 36.1%) and *worse* actual play (4–11 in seat-swapped self-play), and both harnesses now agree. Every earlier move-quality number for α is void in both directions — see §2.4.1. |

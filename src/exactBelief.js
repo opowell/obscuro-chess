@@ -49,12 +49,26 @@
 // rays) exactly — the invariant test replays real recorded games and asserts
 // the true position stays in P.
 //
-// Exactness is abandoned (for this game) if P would exceed CAP positions, a
-// single update runs past a time guard, an update empties P, or the tracker is
-// first attached mid-game — the caller then falls back to the heuristic
-// particle belief (belief.js), and tryReacquire() below can later restore a
-// tight SUPERSET of P once few pieces remain hidden. While |P| = 1 the agent
-// literally knows the true position.
+// OUTGROWING CAP. When one opponent ply would take P past CAP positions, P is
+// not abandoned: it is RESAMPLED (systematic resampling, see resample()) down
+// to CAP/2 positions, each carrying an equal share of the mass it stands for,
+// and tracking carries on from that sample exactly as before. This is a
+// particle filter whose particles are WHOLE POSITIONS reached by real move
+// histories: every member is still a position that could truly be on the
+// board, its weight is still an unbiased estimate of its posterior, and the
+// observation filter still prunes it. Nothing about it is chess-specific
+// guesswork — the only approximation is that P is now a sample of the belief
+// rather than all of it, which `this.sampled` reports. (It replaced handing
+// over to the per-piece particle belief in belief.js, whose hand-tuned
+// placement weights produced boards no real history could reach: a king four
+// squares from home on move 15, never on the square it had castled to.)
+//
+// Exactness is still abandoned (for this game) if a single update runs past a
+// time guard, an update empties P (a sampled P can lose the true position),
+// or the tracker is first attached mid-game — the caller then falls back to
+// the heuristic particle belief (belief.js), and tryReacquire() below can
+// later restore a tight SUPERSET of P once few pieces remain hidden. While
+// |P| = 1 and P is not sampled, the agent literally knows the true position.
 // ---------------------------------------------------------------------------
 
 import {
@@ -64,7 +78,7 @@ import { param, settingsEpoch } from './config.js';
 
 // Exported so src/settings.js can list them; kept defined here,
 // next to the tracker that tunes them.
-export const CAP = 200000;          // paper: |P| usually ≤ 10⁶ (C++); avg ~17k
+export const CAP = 200000;          // paper: |P| usually ≤ 10⁶ (C++); avg ~17k. Past it, P is resampled to CAP/2
 export const TIME_GUARD_MS = 4000;  // per-turn update budget
 export const REACQUIRE_BOUND = 60000;
 
@@ -386,6 +400,35 @@ const WK = 1, WQ = 2, BK = 4, BQ = 8;
 
 function signOf(color) { return color === 'white' ? 1 : -1; }
 
+/**
+ * Systematic resampling: shrink a weighted population to at most `k` members
+ * without biasing it. Each member i is kept c_i times, where c_i is ⌊k·w_i/W⌋
+ * or ⌈k·w_i/W⌉ (so E[c_i] = k·w_i/W exactly), and a kept member's new weight
+ * is c_i·W/k — its expected weight is its old one, and the total mass W is
+ * preserved exactly. P is a SET, so a member drawn several times is kept once
+ * with the summed weight. Members heavier than W/k are always kept; the light
+ * tail is thinned at random in proportion to weight.
+ *
+ * Returns the kept indices (ascending) and their new weights.
+ */
+export function resample(weights, k, rng = Math.random) {
+  const n = weights.length;
+  let total = 0;
+  for (let i = 0; i < n; i++) total += weights[i];
+  if (n <= k || !(total > 0)) return { indices: [...Array(n).keys()], weights: Array.from(weights) };
+  const step = total / k;
+  let u = rng() * step;
+  let acc = 0;
+  const indices = [], out = [];
+  for (let i = 0; i < n; i++) {
+    acc += weights[i];
+    let c = 0;
+    while (u < acc) { c++; u += step; }
+    if (c) { indices.push(i); out.push(c * step); }
+  }
+  return { indices, weights: out };
+}
+
 // Convert an engine board object into a compact position.
 export function fromBoardObject(board, cr, ep) {
   const p = new Int8Array(66);
@@ -691,6 +734,7 @@ export class ExactBelief {
     this.mySign = signOf(aiColor);
     this.exact = null;      // null = not initialised; true/false afterwards
     this.approx = false;    // true when P was re-acquired (tight superset)
+    this.sampled = false;   // true once P outgrew CAP and became a sample of the belief
     this.positions = null;  // Int8Array(66)[]
     this.weights = null;    // Float64Array parallel to positions, Σ = 1
     this.firstTurnDone = false;
@@ -702,7 +746,7 @@ export class ExactBelief {
     this._pi = new Float64Array(256); // per-parent π scratch; grown if needed
   }
 
-  _giveUp() { this.exact = false; this.positions = null; this.weights = null; }
+  _giveUp() { this.exact = false; this.sampled = false; this.positions = null; this.weights = null; }
 
   /**
    * The sampling exponent this tracker resolved at construction. Public because
@@ -849,13 +893,20 @@ export class ExactBelief {
   //     landing on one position are one member with the sum of their
   //     probabilities. Dropping the second (what a Set does) is exactly the line
   //     that used to make the posterior flat.
+  //   • Past CAP successors, the ones gathered so far are resampled down to
+  //     CAP/2 and the sweep carries on (see the header). The weights stay on one
+  //     scale throughout — resampling preserves each member's expected weight
+  //     and the total — so successors of later parents are added exactly as
+  //     before, and the final renormalization conditions on the observation as
+  //     it always did.
   _advanceOpponent(ctx, t0) {
     const oppSign = -this.mySign;
     const myKing = 6 * this.mySign;
     const { obsArr, visLo, visHi } = ctx;
-    const next = [];
-    const nextW = [];
-    const seen = new Map(); // hash → index into next
+    let next = [];
+    let nextW = [];
+    let hashes = [];        // parallel to next, so a resample can rebuild `seen`
+    let seen = new Map();   // hash → index into next
     const W = this.weights;
     const prior = this._prior;
     for (let pi = 0; pi < this.positions.length; pi++) {
@@ -886,7 +937,15 @@ export class ExactBelief {
         seen.set(h, next.length);
         next.push(np);
         nextW.push(w);
-        if (next.length > cap()) { this._giveUp(); return; }
+        hashes.push(h);
+        if (next.length > cap()) {
+          const kept = resample(nextW, Math.max(1, Math.floor(cap() / 2)));
+          next = kept.indices.map(i => next[i]);
+          hashes = kept.indices.map(i => hashes[i]);
+          nextW = kept.weights;
+          seen = new Map(hashes.map((hk, i) => [hk, i]));
+          this.sampled = true;
+        }
       }
     }
     this.positions = next;
@@ -986,6 +1045,7 @@ export class ExactBelief {
     this._setWeights(new Array(out.length).fill(1)); // no history → no posterior
     this.exact = true;
     this.approx = true;              // superset, not the literal history-exact P
+    this.sampled = false;
     this._lastTurnKey = turnKey;     // this turn is done; advance resumes next turn
   }
 
@@ -1086,7 +1146,11 @@ export class ExactBelief {
    * weights are uniform rather than a posterior. The caller must not present
    * either as certainty.
    *
-   * Returns { total, top: [{ index, prob }] (best `limit` first), probs, approx },
+   * `sampled` flags a population that outgrew CAP and was resampled: every
+   * board in it is a real possibility, but the set is a sample of the belief,
+   * so its probabilities are estimates and a board can be missing from it.
+   *
+   * Returns { total, top: [{ index, prob }] (best `limit` first), probs, approx, sampled },
    * where `probs` is the weight of EVERY index (so a caller holding indices from
    * some other enumeration — e.g. the analysis walk's evaluated worlds — can
    * label them too). Null when exact tracking isn't active.
@@ -1112,7 +1176,7 @@ export class ExactBelief {
       if (top.length > cap) top.pop();
     }
 
-    return { total: P.length, probs, top, approx: !!this.approx };
+    return { total: P.length, probs, top, approx: !!this.approx, sampled: !!this.sampled };
   }
 }
 

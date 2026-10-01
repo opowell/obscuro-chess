@@ -16,7 +16,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FogChess } from '../src/FogChess.js';
-import { ExactBelief, fromBoardObject, toBoardObject } from '../src/exactBelief.js';
+import { ExactBelief, fromBoardObject, toBoardObject, resample } from '../src/exactBelief.js';
+import { setOverrides, resetSettings } from '../src/config.js';
 import { replayBelief, placementSig } from '../src/beliefCalibration.js';
 import { makeMovePrior, UNIFORM_PRIOR } from '../src/movePrior.js';
 
@@ -260,6 +261,42 @@ test('exact belief: re-acquisition refuses truncated possible-sets', () => {
   };
   tracker.tryReacquire(view, belief, 9);
   assert.equal(tracker.exact, false, 'must not re-acquire from a truncated set');
+});
+
+test('resample: at most k members, total mass kept, each weight unbiased', () => {
+  const w = [5, 1, 1, 0.5, 0.5, 0.25, 0.25, 0.1, 0.1, 0.1, 0.05, 0.05, 0.05, 0.05];
+  const total = w.reduce((a, b) => a + b, 0);
+  const k = 5;
+  const mean = new Array(w.length).fill(0);
+  const runs = 20000;
+  for (let r = 0; r < runs; r++) {
+    const { indices, weights } = resample(w, k);
+    assert.ok(indices.length <= k, `kept ${indices.length} > ${k}`);
+    const sum = weights.reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(sum - total) < 1e-9, 'the total mass is preserved exactly');
+    assert.ok(indices.includes(0), 'a member heavier than total/k is always kept');
+    indices.forEach((i, j) => { mean[i] += weights[j] / runs; });
+  }
+  w.forEach((wi, i) => assert.ok(Math.abs(mean[i] - wi) < 0.02 * total,
+    `member ${i}: mean kept weight ${mean[i].toFixed(3)} vs ${wi}`));
+  assert.deepEqual(resample([1, 2], 5).indices, [0, 1], 'nothing to shrink: kept as is');
+});
+
+test('exact belief: past CAP, P is resampled rather than abandoned', () => {
+  // This game's P peaks near 130k for black. At a cap of 20k the tracker has to
+  // resample several times; it must keep tracking, never hold more than the cap,
+  // keep a proper distribution, and (at this size) keep the true position.
+  setOverrides({ chess: { EXACT_BELIEF_CAP: 20000 } });
+  try {
+    const r = replayBelief(session('2026-07-14T07-37-02-6f908d7b.json'), 'black');
+    assert.equal(r.gaveUpAtPly, null, 'resampling replaces giving up');
+    assert.equal(r.tracker.sampled, true, 'and says P is now a sample');
+    assert.ok(r.turns.every(t => t.size <= 20000), 'never more than CAP members');
+    const sum = [...r.tracker.weights].reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(sum - 1) < 1e-9, `weights sum to 1, got ${sum}`);
+    const found = r.turns.filter(t => t.found).length;
+    assert.ok(found >= r.turns.length - 1, `true position kept at ${found} of ${r.turns.length} turns`);
+  } finally { resetSettings(); }
 });
 
 test('exact belief: attaching mid-game gives up gracefully', () => {
