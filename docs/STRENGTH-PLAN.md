@@ -78,8 +78,8 @@ Two silent-failure modes in the Stockfish leaf evaluator were found and fixed:
   can capture the king) — a `multiPV` call on such a node returns zero lines,
   and the caller silently fell back to the static evaluator for every child.
   `scoreChildren` now detects a refusal in advance and prices each child
-  individually (capped at `REFUSED_CHILD_CAP = 8`, best-static-score first)
-  instead.
+  individually instead (at first capped at `REFUSED_CHILD_CAP = 8`,
+  best-static-score first; since 2026-10-01 every child, and the cap is gone).
 - **The evaluator was being fed genuinely illegal FEN positions** from two
   sources: castling rights that contradicted the board (now derived from
   board state — a right is only claimed when the king and matching rook are

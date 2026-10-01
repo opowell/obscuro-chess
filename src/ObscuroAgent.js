@@ -199,20 +199,6 @@ function engineWouldRefuse(board, mover) {
   return kingsAdjacent(findKingSquare(board, mover), theirK);
 }
 
-// How many children of a refused node get a real engine evaluation of their own.
-// The parent cannot be scored in one MultiPV call, so each child needs its own —
-// which is why this is capped rather than unbounded: refused nodes are ~10% of
-// all nodes, so pricing every child of every one of them would multiply engine
-// work ~4×. The cap spends the budget on the children most likely to matter
-// (best static score first) and leaves the tail on the static evaluator, which
-// is what the whole node used to get.
-// `OBSCURO_REFUSED_CHILD_CAP` is the DECLARED DEFAULT rather than a layer of its
-// own: it predates the settings system, and a lone env var was the only way to
-// sweep this. `chess.REFUSED_CHILD_CAP` outranks it, like every other parameter.
-export const REFUSED_CHILD_CAP = Number(
-  (typeof process !== 'undefined' && process.env?.OBSCURO_REFUSED_CHILD_CAP) ?? 8);
-const refusedChildCap = () => param('chess.REFUSED_CHILD_CAP', REFUSED_CHILD_CAP);
-
 async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled }) {
   const them = otherColor(mover);
   const out = new Array(actions.length);
@@ -233,12 +219,14 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
   // individually instead. Each CHILD is legal — the opponent is to move and
   // merely in check — so the engine answers there. cp comes back from the
   // child's mover (them), so it is negated onto our scale.
+  //
+  // EVERY child, not the best few by static score: the static evaluator is a
+  // hand-written heuristic, and a refused node is rare enough (~0.4% of leaves
+  // fell back to it under the old cap of 8) that pricing them all costs little.
   if (need.length && engineWouldRefuse(state.board, mover) && await stockfishAvailable()) {
-    const order = [...need].sort((a, b) =>
-      evaluate(childStates[b].board, mover) - evaluate(childStates[a].board, mover));
     const priced = new Set();
     const side = them === 'white' ? 'w' : 'b';
-    for (const i of order.slice(0, refusedChildCap())) {
+    for (const i of need) {
       const cs = childStates[i];
       if (engineWouldRefuse(cs.board, them)) continue; // child refused too — leave it
       let pv = null;
@@ -260,8 +248,8 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     }
     leafStats.refusedNodes++;
     if (truncated) leafStats.truncated++;
-    // The rung is "complete" when the engine answered for the children we chose
-    // to price; the capped tail is a deliberate approximation, not a truncation.
+    // The rung is "complete" when the engine answered for some children; one it
+    // could not score (refused too, or no answer) is on the static evaluator.
     return { scores: out, engineOk: priced.size > 0 && !truncated };
   }
 
@@ -309,7 +297,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     // level with real moves.
     if (pv && pv.length && !truncated) {
       const side = them === 'white' ? 'w' : 'b';
-      const unpriced = need.filter(i => !cpByIdx.has(i)).slice(0, refusedChildCap());
+      const unpriced = need.filter(i => !cpByIdx.has(i));
       for (const i of unpriced) {
         const cs = childStates[i];
         if (engineWouldRefuse(cs.board, them)) continue;

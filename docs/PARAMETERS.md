@@ -58,7 +58,6 @@ move selection — is inherited from §1.
 | `LEAF_CLAMP` | 1500 (cp) | material/eval scores are clamped to this so an imagined king capture from phantom hidden pieces can't swamp a real material decision |
 | `SEARCH_WIN` | 8000 (cp) | the search's terminal win/loss magnitude — chess's override of the generic `1e6`, deliberately bounded (~5.3× `LEAF_CLAMP`) because fog terminal values are *averaged* across belief worlds; unbounded win lets one phantom world dominate |
 | `MAX_SF_DEPTH` | 30 | ceiling of the iterative-deepening ladder (a ceiling to climb toward, not a depth usually reached — see `makeIterativeChessLeafEval`) |
-| `REFUSED_CHILD_CAP` | 8 | how many children of a node the engine refuses to score (the side not to move is "in check") get a real evaluation of their own, best static score first. Capped because refused nodes are ~10% of all nodes and pricing every child of each would multiply engine work ~4×. The `OBSCURO_REFUSED_CHILD_CAP` env var, which predates the settings system, is now just this parameter's *declared default* — the ordinary layers outrank it. |
 
 `KING_HANG` (= `SEARCH_WIN`) is the value assigned when a move leaves the
 mover's own king capturable — deliberately asymmetric with the `+LEAF_CLAMP`
@@ -344,6 +343,5 @@ fitted against it:
   change how a value is stored or keyed, not what it is.
 
 Everything else that changes what the AI plays, or how much work it does per
-move, is settable — including the two knobs a preset needs to state the paper's
-setup, which used to be reachable only through an env var
-(`REFUSED_CHILD_CAP`) or not at all (`CHESS_AGENT_SCORING`).
+move, is settable — including `CHESS_AGENT_SCORING`, which used to be
+reachable not at all.

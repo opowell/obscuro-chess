@@ -111,7 +111,6 @@ export const SETTING_PATHS = {
     LEAF_CLAMP: n,
     SEARCH_WIN: n,
     MAX_SF_DEPTH: n,
-    REFUSED_CHILD_CAP: n,
     CHESS_AGENT_DIAL: {
       depth: d, noiseCp: n, noiseZeroAt: n, quiesceFrom: n,
       fog: { particles: d, topK: d, depthShallow: n, depthDeep: n, shallowBelow: n },

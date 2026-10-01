@@ -29,7 +29,6 @@ export {
   LEAF_CLAMP,
   SEARCH_WIN,
   MAX_SF_DEPTH,
-  REFUSED_CHILD_CAP,
 } from './ObscuroAgent.js';
 
 // src/ChessAgent.js — the plain alpha-beta agent's own difficulty ramp
