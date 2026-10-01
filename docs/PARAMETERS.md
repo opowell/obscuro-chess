@@ -188,39 +188,34 @@ tracking is lost:
 ### 2.5 Move prior — π(move | position) (`src/movePrior.js`)
 
 The opponent model that turns the exact belief `P` from a set into a
-distribution: a softmax over a cheap, O(1)-per-move score (capture value,
-promotion value, piece-square-table delta, a castling bonus).
+distribution: a softmax over a cheap, O(1)-per-move score built from **learned
+tables** (`src/moveTables.js`): a value per piece type and square from the
+mover's side, per captured piece type, per promotion type, and for castling.
+A move's score is the change in table value of every piece that moves, plus what
+it captures or promotes to.
 
-**`FITTED_WEIGHTS`** — the production model, **fitted by conditional-logit MLE
-(`fit-move-prior.mjs --write`), not hand-tuned**. Refitted 2026-08-06 on 246
-Chess.com Fog of War games / 14,836 decisions by 192 players, replacing a fit on
-37 games that were one human plus this engine:
+**Every table value is fitted** by conditional-logit MLE (`fit-move-prior.mjs
+--write`), 395 numbers in all, with the L2 penalty chosen by cross-validation.
+Until 2026-10-01 the square tables were the static evaluator's hand-written
+piece-square tables and the capture values textbook material (king hand-set to
+1000), with nine weights fitted on top. Refitted on 2,872 Chess.com Fog of War
+games / 182,919 decisions; held out by game, move log-loss 3.002 → 2.661 nats,
+and belief log-loss of the true position 0.97–1.09 ± 0.03 nats better, paired
+turn by turn (two runs of the gate). `fit-move-prior.mjs --write` only writes tables that pass that paired
+gate.
+
+**`FITTED_WEIGHTS`** — what sits on top of the tables:
 
 | Field | Value | Note |
 |---|---|---|
-| `temperature` | 100 | fixes the unit only (logits per centipawn × 100) — sharpness lives per-term in `pstWeight`, not in one global knob |
-| `floor` | 0.03 | mixes in the uniform prior: `π = (1-floor)·softmax + floor/\|M\|`; bounds how much damage one confidently-wrong parent can do |
-| `captureWeight` | 0.943 | |
-| `promoWeight` | 0.753 | |
-| `pstWeight` | `[–, 2.887(P), 2.804(N), 6.523(B), 4.509(R), 1.662(Q), 0.032(K)]` | per-piece PST-delta weight. **The king weight is ~0 and must stay there** — see below. |
-| `castleBonus` | 245.2 | the single biggest term in the fitted model |
+| `temperature` | 100 | the unit the tables are written in (logits × 100), not a knob |
+| `floor` | fitted (≈0.04) | mixes in the uniform prior, `π = (1-floor)·softmax + floor/\|M\|`, at the weight that maximizes held-out likelihood; also bounds how much one confidently-wrong parent can cost |
+| `captureWeight`, `promoWeight`, `pstWeight[type]` | 1 | per-term multipliers on the tables — what the rating slopes and ablations act on |
+| `castleBonus` | fitted | the value of castling, in table units |
 
-The refit shipped because it won on held-out games of a corpus the old weights
-had never seen: move log-loss 2.922 → 2.896 (5 folds of 5), and on the gate that
-decides — belief log-loss of the true position — 5.229 → 5.161, with the true
-board's median rank improving 33 → 25.
-
-**The king weight used to be −0.853, documented as "negative on purpose".** That
-finding did not replicate: across 8 disjoint folds of the larger corpus the term
-comes out −0.2, +0.6, 0.0, +0.2, +0.3, −0.2, +0.2, −0.4 — sign-flipping in 5 of
-8, mean 0.03, τ_eff ≈ 3000. Every other term keeps its sign and rough magnitude
-across the same folds. The old value was one player's habit, and the model now
-says nothing about where kings go. `move-prior.test.js` pins it near zero.
-
-Do not hand-tune these — read the file's header (esp. the "SCAR TISSUE"
-section) before changing any of them. `belief.js`'s `THREAT_BIAS`/`MAX_LURKERS`
-document two earlier times an over-sharp belief made the AI measurably worse;
-this model's `floor` exists for the same reason.
+`belief.js`'s `THREAT_BIAS`/`MAX_LURKERS` document two earlier times an
+over-sharp belief made the AI measurably worse; fitting, not tuning, is the
+guard against that here, with the gate as the check.
 
 **`MOVE_PRIOR_UNIFORM`** — `false`. Serve the model-free baseline instead of the
 fitted model: every fog-legal move equally likely (`UNIFORM_PRIOR`). This is the

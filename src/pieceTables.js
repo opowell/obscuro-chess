@@ -1,13 +1,7 @@
 // ---------------------------------------------------------------------------
-// Material values and piece-square tables — the shared numbers behind both the
-// search's static evaluation (ChessAgent.js `pieceScore`) and the belief's move
-// prior (movePrior.js).
-//
-// Kept in their own DEPENDENCY-FREE module on purpose. movePrior.js runs inside
-// the exact-belief sweep (~500k successors per turn) and exactBelief.js
-// deliberately imports nothing; pulling these out of ChessAgent.js means the
-// prior can share the evaluator's tables without dragging in moves.js,
-// board.js, belief.js and stockfish.js behind them.
+// Material values and piece-square tables for the search's static evaluation
+// (ChessAgent.js `pieceScore`). Hand-written. The belief's move prior used to
+// share them; since 2026-10-01 it learns its own (movePrior.js, moveTables.js).
 // ---------------------------------------------------------------------------
 
 export const PIECE_VALUE = { pawn: 100, knight: 320, bishop: 330, rook: 500, queen: 900, king: 20000 };

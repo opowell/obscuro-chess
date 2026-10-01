@@ -9,23 +9,24 @@
 // softmax over a cheap per-move score, so "the opponent probably took the free
 // queen" becomes a number the belief can carry.
 //
-// THE HARD CONSTRAINT IS COST. |P| averages ~17k and fog branching is ~30, so
-// one sweep scores ~500k moves inside exactBelief's 4s guard. Calling the
-// search's static `evaluate(board, color)` per successor — an object-board
-// conversion plus a 64-square walk each — is two orders of magnitude too
-// expensive. So the score here is computed INCREMENTALLY FROM THE MOVE ITSELF,
-// in constant time, on exactBelief's Int8Array(66) representation: everything it
-// needs is in the move record plus one array read for the captured piece.
+// THE HARD CONSTRAINT IS COST. |P| runs to 10⁶ and fog branching is ~30, so
+// one sweep scores millions of moves inside exactBelief's time guard. So the
+// score is computed INCREMENTALLY FROM THE MOVE ITSELF, in constant time, on
+// exactBelief's Int8Array(66) representation: a few table reads.
 //
-//   capture   the victim's material value. Predicted to be the dominant term;
-//             measured to be nearly worthless (+0.058 nats alone, and zeroing it
-//             costs ~nothing) because a capture on a square we can see is priced
-//             by the observation filter before π is consulted.
-//   promotion the value gained over the pawn
-//   PST delta PST[type][to] − PST[type][from], sharing the evaluator's own
-//             tables (pieceTables.js) — this is where the signal actually is: it
-//             discriminates among the genuinely hidden QUIET moves
-//   castling  a flat bonus, and the single biggest term in the fitted model
+//   capture   the captured piece type's value
+//   promotion the promoted piece type's value
+//   squares   table[type][to] − table[type][from] for every piece that moves
+//             (the promoted type arrives; castling moves king and rook) — this
+//             is where most of the signal is: it discriminates among the
+//             genuinely hidden QUIET moves
+//   castling  a value of its own
+//
+// EVERY NUMBER IN THOSE TABLES IS FITTED (src/moveTables.js, written by
+// scripts/fit-move-prior.mjs). Until 2026-10-01 the square tables were the
+// static evaluator's hand-written piece-square tables, the capture values were
+// textbook material with a king hand-set to 1000, and only a weight per term was
+// fitted on top.
 //
 // Deliberately NOT included: "gives check". It needs an attack test against our
 // king square, which is not O(1) on this representation, and the plan calls for
@@ -36,8 +37,9 @@
 //  1. FOG ASYMMETRY. π conditions on the full position p, but the opponent chose
 //     their move under their OWN fog and could not see p. A principled prior
 //     would score from their information set — another belief computation per
-//     node, hopeless at this budget. belief.js makes the same approximation.
-//     The visible consequence is `kingCaptureValue` below.
+//     node, hopeless at this budget. (A king the opponent can capture is always
+//     visible to them — they see every square their pieces can move to — so the
+//     king-capture value at least is learned from decisions made in sight of it.)
 //  2. LEVEL-1 ONLY. The opponent is a fixed static-eval softmax player. They do
 //     not model us modelling them. Do not start down the recursive road here.
 //
@@ -66,96 +68,87 @@
 // below bounds what is left. See FITTED_WEIGHTS.
 // ---------------------------------------------------------------------------
 
-import { PIECE_VALUE, PST } from './pieceTables.js';
 import { param } from './config.js';
+import { MOVE_TABLES } from './moveTables.js';
 
-// Material value by exactBelief piece code (1..6 = P N B R Q K).
+// THE TABLES. Every number the score is built from — a value per (piece type,
+// square) from the mover's side of the board, a value per captured piece type,
+// per promotion type — lives in MOVE_TABLES (src/moveTables.js), written by
+// `fit-move-prior.mjs --write`. Squares are indexed rank*8 + file with rank 0 the
+// MOVER's back rank, so one table serves both colours (a b1–c3 and a b8–c6 are
+// the same entry pair). Units are logits × FITTED_WEIGHTS.temperature (100).
 //
-// The king is 1000, not PIECE_VALUE.king (20000), and that is the whole fog
-// asymmetry in one number. A move that captures OUR king is always pruned by
-// exactBelief (the game did not end, so no such move was played), which means
-// its π mass is removed as evidence — "you could have taken my king and didn't,
-// so this world is unlikely". That inference is only valid if the opponent could
-// SEE our king, and under fog they very often could not. At 20000 the softmax
-// would put essentially all of a parent's mass on the king capture and annihilate
-// any world in which one was available, including true ones. 1000 keeps the
-// evidence real but bounded: a parent that could have taken our king loses most
-// but not all of its weight.
-const VALUE = [0, PIECE_VALUE.pawn, PIECE_VALUE.knight, PIECE_VALUE.bishop,
-  PIECE_VALUE.rook, PIECE_VALUE.queen, 1000];
-
-// PST flattened onto exactBelief's square indexing (i = rank*8 + file, rank 0 =
-// rank 1) for both colours, since the tables are written from the mover's
-// perspective. ChessAgent's pstIndex(sq, color) is (8−r)*8+f for white and
-// (r−1)*8+f for black; in index terms that is a rank flip for white and the
-// identity for black. Int16Array: values fit in ±50 and the lookup is on the hot
-// path.
-const PST_BY_SIGN = (() => {
-  const CODE_TYPE = [null, 'pawn', 'knight', 'bishop', 'rook', 'queen', 'king'];
-  const white = new Int16Array(7 * 64);
-  const black = new Int16Array(7 * 64);
+// Compiled once per tables object into flat typed arrays for the hot path.
+const compiledTables = new WeakMap();
+const TYPES = [null, 'pawn', 'knight', 'bishop', 'rook', 'queen', 'king'];
+function compile(tables) {
+  let c = compiledTables.get(tables);
+  if (c) return c;
+  const pst = new Float64Array(7 * 64), capture = new Float64Array(7), promo = new Float64Array(7);
   for (let t = 1; t <= 6; t++) {
-    const table = PST[CODE_TYPE[t]];
-    if (!table) continue;
-    for (let i = 0; i < 64; i++) {
-      const r = i >> 3, f = i & 7;
-      white[t * 64 + i] = table[(7 - r) * 8 + f];
-      black[t * 64 + i] = table[r * 8 + f];
-    }
+    const row = tables.pst?.[TYPES[t]];
+    if (row) for (let i = 0; i < 64; i++) pst[t * 64 + i] = row[i] ?? 0;
+    capture[t] = tables.capture?.[TYPES[t]] ?? 0;
+    if (t >= 2 && t <= 5) promo[t] = tables.promo?.[TYPES[t]] ?? 0;
   }
-  return { white, black };
-})();
+  c = { pst, capture, promo };
+  compiledTables.set(tables, c);
+  return c;
+}
+
+// A square from the mover's side: white's own back rank is rank 0 already;
+// black's is rank 7, so black's squares are mirrored rank-wise.
+const rel = (sq, sign) => (sign > 0 ? sq : ((7 - (sq >> 3)) << 3) | (sq & 7));
+
+// A castle's rook squares, absolute: [from, to].
+function castleRook(m, sign) {
+  const base = sign > 0 ? 0 : 56;
+  return m.castle === 1 ? [base + 7, base + 5] : [base, base + 3];
+}
 
 /**
- * Score one fog-legal move in centipawn-ish units, O(1).
+ * Score one fog-legal move, O(1): the change in table value of every piece that
+ * moves, plus the value of what it captures, of what it promotes to, and of
+ * castling itself. In units of logits × temperature.
  *
  * `pos` is exactBelief's Int8Array(66) BEFORE the move; `m` is a move record
  * from genFogMoves ({ f, t, promo, dbl, ep, castle }); `sign` is +1 for white,
  * −1 for black. Exported so the calibration harness (and tests) can inspect the
  * model separately from the softmax that turns it into a distribution.
  *
- * `w.pstWeight` may be a NUMBER (one weight for every piece type, the original
- * model) or an ARRAY indexed by piece code 1..6 (the fitted model — the terms
- * span more than a factor of six, and the king's is ~0, so a single number
- * cannot express them). Defaults are all-1 / castleBonus 0, i.e. the raw feature
- * sum, which is what the unit tests pin; the shipped numbers live in
- * FITTED_WEIGHTS.
+ * `w` holds per-term MULTIPLIERS on the tables (all 1 in the shipped model, and
+ * the handle the rating slopes and ablations turn) and `w.tables` the tables
+ * themselves, MOVE_TABLES by default:
+ *
+ *   captureWeight   × the captured piece's value
+ *   promoWeight     × the promoted piece's value
+ *   pstWeight[type] × the moving piece's square delta (the MOVER's type, so a
+ *                     promotion is a pawn's decision); may be one number
+ *   castleBonus       added for castling (a value, not a multiplier)
  */
 export function scoreMove(pos, m, sign, w = {}) {
-  const captureWeight = w.captureWeight ?? 1;
+  const T = compile(w.tables ?? MOVE_TABLES);
   const pw = w.pstWeight;
-  const promoWeight = w.promoWeight ?? 1;
-  const castleBonus = w.castleBonus ?? 0;
-  const pstTab = sign > 0 ? PST_BY_SIGN.white : PST_BY_SIGN.black;
-
+  const pstW = t => (pw === undefined ? 1 : (typeof pw === 'number' ? pw : pw[t]));
+  const pst = T.pst;
   if (m.castle) {
-    // Both king and rook move; the king's own PST delta is the dominant part and
-    // castling is generically good, so add a flat bonus rather than pretending
-    // to price the rook's repositioning. (The fit makes the bonus the single
-    // biggest term in the model — see FITTED_WEIGHTS.)
-    const kw = pw === undefined ? 1 : (typeof pw === 'number' ? pw : pw[6]);
-    return castleBonus + kw * (pstTab[6 * 64 + m.t] - pstTab[6 * 64 + m.f]);
+    const [rf, rt] = castleRook(m, sign);
+    return (w.castleBonus ?? 0)
+      + pstW(6) * (pst[6 * 64 + rel(m.t, sign)] - pst[6 * 64 + rel(m.f, sign)])
+      + pstW(4) * (pst[4 * 64 + rel(rt, sign)] - pst[4 * 64 + rel(rf, sign)]);
   }
-
   const mover = pos[m.f];
   const type = mover > 0 ? mover : -mover;
   let s = 0;
-
-  // Capture. En passant takes a pawn that is NOT on the destination square, so
-  // read the victim from m.ep when it is set.
+  // En passant takes a pawn that is NOT on the destination square, so read the
+  // victim from m.ep when it is set.
   const victim = m.ep >= 0 ? pos[m.ep] : pos[m.t];
-  if (victim) s += captureWeight * VALUE[victim > 0 ? victim : -victim];
-
-  // Promotion: the material actually gained.
-  if (m.promo) s += promoWeight * (VALUE[m.promo] - VALUE[1]);
-
-  // Piece-square delta. The piece that ARRIVES is the promoted type, so the two
-  // ends of the delta can come from different tables. The WEIGHT is the mover's,
-  // not the arriving type's — a promotion is a pawn's decision.
+  if (victim) s += (w.captureWeight ?? 1) * T.capture[victim > 0 ? victim : -victim];
+  if (m.promo) s += (w.promoWeight ?? 1) * T.promo[m.promo];
+  // The piece that ARRIVES is the promoted type, so the two ends of the delta
+  // can come from different tables.
   const arriving = m.promo ? m.promo : type;
-  const pstWeight = pw === undefined ? 1 : (typeof pw === 'number' ? pw : pw[type]);
-  s += pstWeight * (pstTab[arriving * 64 + m.t] - pstTab[type * 64 + m.f]);
-
+  s += pstW(type) * (pst[arriving * 64 + rel(m.t, sign)] - pst[type * 64 + rel(m.f, sign)]);
   return s;
 }
 
@@ -167,33 +160,97 @@ export const FEATURE_NAMES = ['capture', 'promo', 'pst.pawn', 'pst.knight',
 export const NUM_FEATURES = FEATURE_NAMES.length;
 
 /**
- * The same model as `scoreMove`, DECOMPOSED — fills `out[0..8]` with each term's
- * feature value in centipawn units (the castle indicator is 0/1). By
+ * The same model as `scoreMove`, DECOMPOSED by term — fills `out[0..8]` with each
+ * term's value from the tables (the castle term is the 0/1 indicator). By
  * construction
  *
  *     scoreMove(pos, m, sign, w) === Σ_k weightVector(w)[k] * out[k]
  *
- * which is what makes it safe to fit weights offline against these features and
- * serve them through `scoreMove`'s fast path. move-prior.test.js asserts that
- * identity over random positions; if you add a term to one function, the test
- * fails until you add it to the other.
+ * for the same tables, which is what lets the rating slopes be fitted against
+ * these terms and served through scoreMove. move-prior.test.js asserts it.
  */
-export function moveFeatures(pos, m, sign, out) {
+export function moveFeatures(pos, m, sign, out, tables = MOVE_TABLES) {
   for (let k = 0; k < NUM_FEATURES; k++) out[k] = 0;
-  const pstTab = sign > 0 ? PST_BY_SIGN.white : PST_BY_SIGN.black;
+  const pst = compile(tables).pst;
   if (m.castle) {
+    const [rf, rt] = castleRook(m, sign);
     out[8] = 1;
-    out[7] = pstTab[6 * 64 + m.t] - pstTab[6 * 64 + m.f];
+    out[7] = pst[6 * 64 + rel(m.t, sign)] - pst[6 * 64 + rel(m.f, sign)];
+    out[5] = pst[4 * 64 + rel(rt, sign)] - pst[4 * 64 + rel(rf, sign)];
     return out;
+  }
+  const T = compile(tables);
+  const mover = pos[m.f];
+  const type = mover > 0 ? mover : -mover;
+  const victim = m.ep >= 0 ? pos[m.ep] : pos[m.t];
+  if (victim) out[0] = T.capture[victim > 0 ? victim : -victim];
+  if (m.promo) out[1] = T.promo[m.promo];
+  const arriving = m.promo ? m.promo : type;
+  out[2 + type - 1] = pst[arriving * 64 + rel(m.t, sign)] - pst[type * 64 + rel(m.f, sign)];
+  return out;
+}
+
+// THE TABLES AS ONE PARAMETER VECTOR, for the fitter. Entry layout:
+//   pst      (type − 1) · 64 + square-from-the-mover's-side    0 … 383
+//   capture  384 + (captured type − 1)                         384 … 389
+//   promo    390 + (promoted type − 2)                         390 … 393
+//   castle   394                                               (castleBonus)
+export const NUM_ENTRIES = 395;
+export const ENTRY = { PST: 0, CAPTURE: 384, PROMO: 390, CASTLE: 394 };
+
+/**
+ * A move as sparse ±1 counts over the table entries: `scoreMove` with every
+ * multiplier at 1 is exactly Σ entry value × count. Writes into idx/val and
+ * returns how many entries it wrote (at most 5). The fitter learns the tables
+ * against this, and move-prior.test.js pins it to scoreMove.
+ *
+ * `term`, if given, receives each entry's index into FEATURE_NAMES — the
+ * multiplier that scales it in scoreMove — so the per-term multipliers (and the
+ * rating slopes on them) can be fitted on top of the tables.
+ */
+export function moveEntries(pos, m, sign, idx, val, term = null) {
+  let n = 0;
+  const put = (i, v, k) => { idx[n] = i; val[n] = v; if (term) term[n] = k; n++; };
+  if (m.castle) {
+    const [rf, rt] = castleRook(m, sign);
+    put(5 * 64 + rel(m.t, sign), 1, 7); put(5 * 64 + rel(m.f, sign), -1, 7);
+    put(3 * 64 + rel(rt, sign), 1, 5); put(3 * 64 + rel(rf, sign), -1, 5);
+    put(ENTRY.CASTLE, 1, 8);
+    return n;
   }
   const mover = pos[m.f];
   const type = mover > 0 ? mover : -mover;
   const victim = m.ep >= 0 ? pos[m.ep] : pos[m.t];
-  if (victim) out[0] = VALUE[victim > 0 ? victim : -victim];
-  if (m.promo) out[1] = VALUE[m.promo] - VALUE[1];
+  if (victim) put(ENTRY.CAPTURE + (victim > 0 ? victim : -victim) - 1, 1, 0);
+  if (m.promo) put(ENTRY.PROMO + m.promo - 2, 1, 1);
   const arriving = m.promo ? m.promo : type;
-  out[2 + type - 1] = pstTab[arriving * 64 + m.t] - pstTab[type * 64 + m.f];
-  return out;
+  put((arriving - 1) * 64 + rel(m.t, sign), 1, 1 + type);
+  put((type - 1) * 64 + rel(m.f, sign), -1, 1 + type);
+  return n;
+}
+
+/** A parameter vector (NUM_ENTRIES long) → tables, and the castle value. */
+export function tablesFromVector(v) {
+  const pst = {}, capture = {}, promo = {};
+  for (let t = 1; t <= 6; t++) {
+    pst[TYPES[t]] = Array.from({ length: 64 }, (_, i) => v[(t - 1) * 64 + i]);
+    capture[TYPES[t]] = v[ENTRY.CAPTURE + t - 1];
+    if (t >= 2 && t <= 5) promo[TYPES[t]] = v[ENTRY.PROMO + t - 2];
+  }
+  return { tables: { pst, capture, promo }, castleBonus: v[ENTRY.CASTLE] };
+}
+
+/** Tables and castle value → a parameter vector. */
+export function vectorFromTables(tables, castleBonus = 0) {
+  const T = compile(tables);
+  const v = new Float64Array(NUM_ENTRIES);
+  for (let t = 1; t <= 6; t++) {
+    for (let i = 0; i < 64; i++) v[(t - 1) * 64 + i] = T.pst[t * 64 + i];
+    v[ENTRY.CAPTURE + t - 1] = T.capture[t];
+    if (t >= 2 && t <= 5) v[ENTRY.PROMO + t - 2] = T.promo[t];
+  }
+  v[ENTRY.CASTLE] = castleBonus;
+  return v;
 }
 
 /** A weights object → the flat vector `moveFeatures` is dotted with. */
@@ -216,48 +273,36 @@ export function weightsFromVector(v, extra = {}) {
 // ---------------------------------------------------------------------------
 // FITTED_WEIGHTS — regenerate with `node scripts/fit-move-prior.mjs --write`.
 //
-// Conditional-logit MLE over every fog-legal move list in the corpus. REFITTED
-// 2026-08-06 on 246 Chess.com Fog of War games / 14,836 decisions by 192
-// different players (`--sessions <crawl>.json`), replacing a 2026-07-31 fit on
-// 37 games / 1520 decisions that were one human plus this engine. τ = 100 is not
-// a tuned knob: it fixes the unit (weight = logits per centipawn × 100) and
-// nothing else, because the sharpness lives per-term. Read the weights as
-// effective temperatures — bishop PST τ≈15, rook τ≈22, pawn τ≈35, knight τ≈36,
-// queen τ≈60, capture τ≈106, promotion τ≈133.
+// The tables themselves are in src/moveTables.js. What is here:
 //
-// WHY THE REFIT SHIPPED. Scored on held-out games of the new corpus, which the
-// old weights had never seen: move log-loss 2.922 → 2.896 (better in 5 folds of
-// 5), and on the gate that actually matters — BELIEF log-loss of the true
-// position — 5.229 → 5.161, with the true board's median rank in the belief's
-// own ordering improving 33 → 25. `notInP` stayed 0 in every arm.
+//   temperature  100: the unit the tables are written in (logits × 100). Not a
+//                knob — sharpness lives in the fitted table values.
+//   floor        the mixture with the uniform prior, π = (1 − floor)·softmax +
+//                floor/|M|, FITTED as the weight that maximizes held-out
+//                likelihood. It also bounds the damage one confident mistake
+//                can do: no legal move gets less than floor/|M|.
+//   multipliers  captureWeight, promoWeight, pstWeight[type]: all 1. They scale
+//                the tables term by term, which is what the rating slopes and
+//                ablations act on.
+//   castleBonus  the fitted value of castling, in table units.
 //
-// THE KING WEIGHT IS NOW ~0, AND THAT IS THE INTERESTING PART. The previous fit
-// had it at −0.853 and this comment used to explain, at length, that under fog
-// players walk kings toward the centre rather than to the corner a normal
-// midgame table rewards. THAT FINDING DID NOT REPLICATE. Fitting the term on 8
-// disjoint folds of the new corpus gives −0.2, +0.6, 0.0, +0.2, +0.3, −0.2,
-// +0.2, −0.4: it flips sign in 5 of 8 and averages 0.03 (τ_eff ≈ 3000, i.e. no
-// signal). Every other term is stable in sign and close in magnitude across the
-// same folds. So the negative king weight was one player's habit read as a fact
-// about fog chess — which the old comment half-anticipated by noting the term
-// bought nothing measurable on the board posterior anyway.
-//
-// Do not "fix" this back to a confident value in either direction without a
-// corpus that shows one. move-prior.test.js pins it near zero for that reason.
-//
-// FLOOR is the mixture with the uniform prior. It COSTS 0.008 nats; what it buys
-// is a bound. No legal move can ever be assigned less than floor/|M|, so no
-// single confident mistake can annihilate the true world — the failure mode that
-// made the τ<60 cliff so steep. Insurance, deliberately bought, not tuned.
+// REFITTED 2026-10-01 on 2,872 Chess.com Fog of War games / 182,919 decisions
+// (fow-crawl-2026-08-06, 1,604 players), now fitting every table entry instead
+// of nine weights on hand-written tables. Held out (3-fold CV by game): move
+// log-loss 3.002 → 2.661 nats; belief log-loss of the true position, paired turn
+// by turn over ~4,600 turns, 0.97–1.09 nats better (± 0.03; two runs — the gate
+// is not exactly repeatable, since past the time guard P is a sample), and the
+// true position lost from a sampled P on 66–72 turns where the old tables kept
+// it, against 277–324 the other way. See scripts/fit-move-prior.mjs.
 // ---------------------------------------------------------------------------
 export const FITTED_WEIGHTS = {
   temperature: 100,
-  floor: 0.03,
-  captureWeight: 0.943,
-  promoWeight: 0.753,
+  floor: 0.0391,
+  captureWeight: 1,
+  promoWeight: 1,
   //          -  pawn  knight bishop  rook  queen   king
-  pstWeight: [0, 2.887, 2.804, 6.523, 4.509, 1.662, 0.032],
-  castleBonus: 245.2,
+  pstWeight: [0, 1, 1, 1, 1, 1, 1],
+  castleBonus: 302.4,
 };
 
 // ---------------------------------------------------------------------------

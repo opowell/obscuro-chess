@@ -73,7 +73,7 @@ if (!corpus || has('help')) {
 adopt-corpus <corpus> [--write] [--folds N] [--e2e-games N] [--min-health P]
 
   <corpus>        a directory, .zip, .pgn, session .json or crawl .json (.gz ok)
-  --write         update FITTED_WEIGHTS if the corpus passes every gate
+  --write         update the move tables if the corpus passes every gate
   --folds N       cross-validation folds, by game (default 5)
   --e2e-games N   games to run the belief gate over (default 60; it is the slow
                   step, ~4s per game per arm)
@@ -145,33 +145,25 @@ console.log(`\n✓ health ${(100 * health).toFixed(1)}% ≥ ${(100 * MIN_HEALTH)
 
 rule('2/5  MOVE-LEVEL FIT — refit vs the weights already shipped, held out');
 const cv = fitter(['--folds', FOLDS]);
-const moveGain = num(cv, /refitting on this corpus buys (-?[\d.]+) nats/);
+const pooledShipped = num(cv, /POOLED: .*?shipped ([\d.]+)/);
+const pooledLearned = num(cv, /learned\+floor ([\d.]+)/);
+const moveGain = pooledShipped != null && pooledLearned != null ? pooledShipped - pooledLearned : null;
 
 rule(`3/5  THE GATE — belief log-loss of the true position (${E2E_GAMES} games)`);
 console.log('This is the number that decides. Slow: it replays the belief per arm.');
-// --max-games caps the whole corpus load, so the `fitted` arm is refit on a
-// fraction of THIS subset while `shipped` carries whatever it was fitted on.
-// Below about half the corpus that handicap is big enough to flip the verdict,
-// and a user trimming --e2e-games to save time would never guess why.
-const e2eFrac = Math.min(1, Number(E2E_GAMES) / games.length);
-if (e2eFrac < 0.5) {
-  console.log(`\n! --e2e-games ${E2E_GAMES} is ${(100 * e2eFrac).toFixed(0)}% of the ${games.length} loaded games.`);
-  console.log('! The `fitted` arm is refit on a fraction of that subset, while `shipped`');
-  console.log('! keeps whatever it was fitted on, so this comparison UNDERSTATES the refit.');
-  console.log('! A negative gate here is weak evidence; raise --e2e-games before believing it.');
-}
-console.log('');
-const e2e = fitter(['--folds', FOLDS, '--max-games', E2E_GAMES, '--e2e']);
-const shippedLL = num(e2e, /^\s*shipped\s+ll=([\d.]+)/m);
-const fittedLL = num(e2e, /^\s*fitted\s+ll=([\d.]+)/m);
-const notIn = num(e2e, /notInP=(\d+)/);
-const beliefGain = shippedLL != null && fittedLL != null ? shippedLL - fittedLL : null;
+// The fit uses the whole corpus; only the replays are capped at --e2e-games.
+const e2e = fitter(['--folds', FOLDS, '--e2e', '--e2e-games', E2E_GAMES]);
+const paired = num(e2e, /PAIRED, learned − shipped, on \d+ turns[^:]*: (-?[\d.]+)/);
+const pairedSe = num(e2e, /PAIRED, learned − shipped, on \d+ turns[^:]*: -?[\d.]+ ± ([\d.]+)/);
+const lostLearned = num(e2e, /lost by learned only: (\d+)/);
+const lostShipped = num(e2e, /by shipped only: (\d+)/);
+const beliefGain = paired != null ? -paired : null;
 
 // --- 4. rating ---------------------------------------------------------------
 
 rule('4/5  RATING — does conditioning π on opponent strength buy anything?');
 const rating = spread ? fitter(['--folds', FOLDS, '--rating']) : (console.log('no ratings in this corpus; skipped.'), '');
-const ratingGain = num(rating, /Δ ([+-][\d.]+)\s+(?:ships|no better|LOSES)/);
+const ratingGain = num(rating, /Δ (-?[\d.]+)\s+(?:ships|does not ship)/);
 
 // --- 5. verdict --------------------------------------------------------------
 
@@ -179,11 +171,13 @@ rule('5/5  VERDICT');
 const fmt = x => x == null ? 'n/a' : `${x >= 0 ? '+' : ''}${x.toFixed(4)} nats`;
 console.log(`  ingest health       ${(100 * health).toFixed(1)}%`);
 console.log(`  move-level gain     ${fmt(moveGain)}   (refit vs shipped, held out)`);
-console.log(`  BELIEF gain         ${fmt(beliefGain)}   (the gate: ${shippedLL ?? '?'} → ${fittedLL ?? '?'})`);
+console.log(`  BELIEF gain         ${fmt(beliefGain)}   (the gate, paired per turn, ± ${pairedSe ?? '?'})`);
 console.log(`  rating conditioning ${fmt(ratingGain)}   (sloped vs flat, held out)`);
-console.log(`  notInP              ${notIn ?? '?'}   (must be 0 — subsystem invariant, not a metric)`);
+console.log(`  true position lost  refit only ${lostLearned ?? '?'} turns, shipped only ${lostShipped ?? '?'}`);
 
-const gatePassed = beliefGain != null && beliefGain > 0 && notIn === 0;
+// The same rule fit-move-prior.mjs --write applies.
+const gatePassed = paired != null && pairedSe != null && paired + 2 * pairedSe < 0
+  && lostLearned != null && lostShipped != null && lostLearned <= lostShipped;
 // A corpus the shipped weights were ALREADY fitted on scores ~0 on both gains,
 // which is a different situation from a corpus that has nothing to offer, and
 // deserves different advice.
@@ -194,23 +188,17 @@ const verdict = gatePassed
     ? 'NOTHING TO DO — the shipped weights already fit this corpus as well as a\n  refit does, which is what you see when it has been adopted already.'
     : 'DO NOT SHIP — the refit does not beat the shipped weights on the belief gate.';
 console.log(`\n  ${verdict}`);
-if (!gatePassed && e2eFrac < 0.5) {
-  console.log(`  (…and the gate ran on ${(100 * e2eFrac).toFixed(0)}% of the corpus, which handicaps the refit —`);
-  console.log('   re-run with a larger --e2e-games before treating this as settled.)');
-}
 
 // The caveat that keeps a calibration win from being reported as a strength win.
 console.log(`
   ── and the thing this does NOT measure ────────────────────────────────────
-  π reaches MOVE SELECTION only through the world draw, and only when the
-  search is told to use the posterior. Both switches ship at zero:
+  π reaches MOVE SELECTION only through the world draw and its reach weight:
 
       SAMPLE_ALPHA_DEFAULT     = ${SAMPLE_ALPHA_DEFAULT}   (draw ∝ w^α; 0 = uniform over P)
       REACH_WEIGHTING_DEFAULT  = ${REACH_WEIGHTING_DEFAULT}   (β; 0 = flat 1/N reach)
 
-  At those defaults a better prior is a better BELIEF — better analysis, better
-  calibration — and changes nothing about which move the AI plays. To convert
-  belief accuracy into strength, re-test the α/β decision against this corpus:
+  A better belief is a better ANALYSIS and calibration; whether it is a stronger
+  player is a separate measurement. Re-test the α/β decision against this corpus:
 
       node scripts/move-quality.mjs --sessions ${corpus} --arm alpha
       node scripts/move-quality.mjs --sessions ${corpus} --arm null    # control
@@ -227,7 +215,7 @@ if (has('write')) {
     process.exit(1);
   }
   rule('WRITING');
-  fitter(['--folds', FOLDS, '--rating', '--write']);
+  fitter(['--folds', FOLDS, '--rating', '--e2e', '--e2e-games', E2E_GAMES, '--write']);
   console.log('\nNow re-run `npm test`, and update the corpus provenance in');
   console.log('docs/STRENGTH-PLAN.md and docs/PARAMETERS.md — the numbers above are');
   console.log('the ones to record.');

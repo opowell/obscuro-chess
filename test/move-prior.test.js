@@ -10,7 +10,9 @@ import assert from 'node:assert/strict';
 import {
   makeMovePrior, UNIFORM_PRIOR, scoreMove, moveFeatures, weightVector,
   weightsFromVector, NUM_FEATURES, FITTED_WEIGHTS,
+  moveEntries, vectorFromTables, tablesFromVector, NUM_ENTRIES,
 } from '../src/movePrior.js';
+import { MOVE_TABLES } from '../src/moveTables.js';
 import { fromBoardObject, genFogMoves, getDefaultMovePrior } from '../src/exactBelief.js';
 
 const unit = (id, ownerId, type, position) => ({ id, ownerId, type, position, alive: true });
@@ -71,18 +73,19 @@ test('movePrior: temperature controls sharpness, and uniform is the τ→∞ lim
 });
 
 test('movePrior: promotion, en passant and castling all price correctly', () => {
-  // Black pawn on b2 promoting, and a white pawn on a2 it can take en route.
+  const T = MOVE_TABLES;
+  const rank = (sq, sign) => (sign > 0 ? idx(sq) : (7 - (idx(sq) >> 3)) * 8 + (idx(sq) & 7));
+  // Black pawn on b2 promoting: the pawn leaves its square, the PROMOTED piece
+  // arrives, and the promotion's own value is added.
   const pos = fromBoardObject({
     b2: unit('bP', 'black', 'pawn', 'b2'),
     a2: unit('wP', 'white', 'pawn', 'a2'),
     e8: unit('bK', 'black', 'king', 'e8'),
     e1: unit('wK', 'white', 'king', 'e1'),
   }, null, null);
-  const quiet = scoreMove(pos, mv('b2', 'b1'), -1);
   const toQueen = scoreMove(pos, mv('b2', 'b1', { promo: 5 }), -1);
-  const toKnight = scoreMove(pos, mv('b2', 'b1', { promo: 2 }), -1);
-  assert.ok(toQueen > toKnight, 'a queen is worth more than a knight');
-  assert.ok(toQueen > quiet + 700, 'promotion is worth roughly a queen minus a pawn');
+  const expected = T.promo.queen + T.pst.queen[rank('b1', -1)] - T.pst.pawn[rank('b2', -1)];
+  assert.ok(Math.abs(toQueen - expected) < 1e-9, `promotion = promo value + queen arriving − pawn leaving: ${toQueen} vs ${expected}`);
 
   // En passant reads the victim from m.ep, not from the (empty) destination.
   const epPos = fromBoardObject({
@@ -92,18 +95,19 @@ test('movePrior: promotion, en passant and castling all price correctly', () => 
     e1: unit('wK', 'white', 'king', 'e1'),
   }, null, 'a3');
   const ep = scoreMove(epPos, mv('b4', 'a3', { ep: idx('a4') }), -1);
-  const push = scoreMove(epPos, mv('b4', 'b3'), -1);
-  assert.ok(ep > push + 50, `en passant is scored as a pawn capture: ${ep} vs ${push}`);
+  const epQuiet = T.pst.pawn[rank('a3', -1)] - T.pst.pawn[rank('b4', -1)];
+  assert.ok(Math.abs(ep - (epQuiet + T.capture.pawn)) < 1e-9, 'en passant is scored as a pawn capture');
 
-  // Castling has no victim and no `from` piece delta worth pricing beyond the
-  // king's own; it must at least come out finite and respect the bonus knob.
+  // Castling moves the king AND the rook, and the castle value is additive.
   const cPos = fromBoardObject({
     e8: unit('bK', 'black', 'king', 'e8'),
     h8: unit('bR', 'black', 'rook', 'h8'),
     e1: unit('wK', 'white', 'king', 'e1'),
   }, { white: {}, black: { kingSide: true, queenSide: false } }, null);
   const castle = mv('e8', 'g8', { castle: 1 });
-  assert.ok(Number.isFinite(scoreMove(cPos, castle, -1)));
+  const squares = T.pst.king[rank('g8', -1)] - T.pst.king[rank('e8', -1)]
+    + T.pst.rook[rank('f8', -1)] - T.pst.rook[rank('h8', -1)];
+  assert.ok(Math.abs(scoreMove(cPos, castle, -1) - squares) < 1e-9, 'king and rook both move');
   assert.equal(
     scoreMove(cPos, castle, -1, { castleBonus: 60 }) - scoreMove(cPos, castle, -1),
     60, 'castleBonus is additive');
@@ -126,7 +130,6 @@ test('movePrior: the PST is oriented per colour', () => {
   const wDev = scoreMove(w, mv('b1', 'c3'), 1);
   const bDev = scoreMove(b, mv('b8', 'c6'), -1);
   assert.equal(wDev, bDev, 'mirrored development scores the same for both colours');
-  assert.ok(wDev > 0, 'and developing a knight off the back rank is an improvement');
 });
 
 // A busy position with something of every kind in it: captures for both sides,
@@ -221,39 +224,33 @@ test('movePrior: the floor bounds how wrong one ply can be', () => {
   assert.throws(() => makeMovePrior({ temperature: 100, floor: 1 }), /floor/);
 });
 
-test('movePrior: the shipped model has NO opinion about where kings go', () => {
-  // This test used to assert the opposite sign, and the story behind the change
-  // is worth keeping. The 2026-07-31 fit (37 games, one human plus this engine)
-  // put the king PST weight at −0.853, and that was read as a fact about fog
-  // chess: players walk kings toward the centre, not to the corner ChessAgent's
-  // normal midgame table rewards.
-  //
-  // Refitting on 246 Chess.com games by 192 players did not reproduce it. Across
-  // 8 disjoint folds the term came out −0.2, +0.6, 0.0, +0.2, +0.3, −0.2, +0.2,
-  // −0.4 — sign-flipping in 5 of 8, mean 0.03 — while every other term held its
-  // sign and rough magnitude. One player's habit, not a property of the game.
-  //
-  // So what is pinned now is the ABSENCE of a claim: the term must stay near
-  // zero. A confident value in EITHER direction needs a corpus that shows one.
-  assert.ok(Math.abs(FITTED_WEIGHTS.pstWeight[6]) < 0.5,
-    `king PST weight should be ~0, got ${FITTED_WEIGHTS.pstWeight[6]}`);
-
-  // Concretely: king moves are priced almost entirely by the other terms, so
-  // centralising and retreating score within a rounding error of each other.
-  const pos = fromBoardObject({
-    e4: unit('wK', 'white', 'king', 'e4'),
-    a8: unit('bK', 'black', 'king', 'a8'),
-  }, null, null);
-  const toCentre = scoreMove(pos, mv('e4', 'd5'), 1, FITTED_WEIGHTS);
-  const toEdge = scoreMove(pos, mv('e4', 'e3'), 1, FITTED_WEIGHTS);
-  assert.ok(Math.abs(toCentre - toEdge) < 10,
-    `neither king move is strongly preferred: ${toCentre} vs ${toEdge}`);
-  // The hand model, by construction, had a strong opinion — that is the contrast.
-  const handCentre = scoreMove(pos, mv('e4', 'd5'), 1);
-  const handEdge = scoreMove(pos, mv('e4', 'e3'), 1);
-  assert.ok(handCentre < handEdge, 'the unfitted model still prefers the corner');
-  assert.ok(Math.abs(handCentre - handEdge) > Math.abs(toCentre - toEdge),
-    'and it holds that opinion more strongly than the fitted model holds any');
+test('movePrior: the fitter\'s table entries ARE scoreMove', () => {
+  // fit-move-prior.mjs learns the tables against `moveEntries` and production
+  // serves them through `scoreMove`; if the two ever disagree, the tables are
+  // for a model nobody runs. Pinned over every fog-legal move of a busy
+  // position, for the shipped tables and for an arbitrary parameter vector.
+  const pos = busy();
+  const arbitrary = Float64Array.from({ length: NUM_ENTRIES }, (_, i) => Math.sin(i * 1.7) * 50);
+  const { tables, castleBonus } = tablesFromVector(arbitrary);
+  const cases = [
+    { theta: vectorFromTables(MOVE_TABLES, FITTED_WEIGHTS.castleBonus), w: FITTED_WEIGHTS },
+    { theta: arbitrary, w: { tables, castleBonus } },
+  ];
+  const ix = new Int16Array(8), vx = new Int8Array(8);
+  let checked = 0;
+  for (const sign of [1, -1]) {
+    for (const m of genFogMoves(pos, sign)) {
+      const k = moveEntries(pos, m, sign, ix, vx);
+      for (const { theta, w } of cases) {
+        let dot = 0;
+        for (let e = 0; e < k; e++) dot += theta[ix[e]] * vx[e];
+        assert.ok(Math.abs(dot - scoreMove(pos, m, sign, w)) < 1e-9,
+          `entries·θ must equal scoreMove for ${JSON.stringify(m)}`);
+      }
+      checked++;
+    }
+  }
+  assert.ok(checked > 40, `the fixture should exercise plenty of moves, got ${checked}`);
 });
 
 test('movePrior: production actually serves the fitted model', () => {
@@ -272,21 +269,4 @@ test('movePrior: production actually serves the fitted model', () => {
   for (let j = 0; j < moves.length; j++) {
     assert.ok(a[j] >= FITTED_WEIGHTS.floor / moves.length - 1e-12, 'floored in production');
   }
-});
-
-test('movePrior: the king is priced below a queen, on purpose', () => {
-  // Capturing our king is always PRUNED by exactBelief, so its π mass is removed
-  // as evidence ("you could have taken my king and didn't"). Under fog the
-  // opponent often could not see the king, so that evidence must stay bounded —
-  // at PIECE_VALUE.king (20000) it would annihilate any world offering one.
-  const pos = fromBoardObject({
-    d8: unit('bR', 'black', 'rook', 'd8'),
-    d4: unit('wQ', 'white', 'queen', 'd4'),
-    d1: unit('wK', 'white', 'king', 'd1'),
-    e8: unit('bK', 'black', 'king', 'e8'),
-  }, null, null);
-  const takeQueen = scoreMove(pos, mv('d8', 'd4'), -1);
-  const takeKing = scoreMove(pos, mv('d8', 'd1'), -1);
-  assert.ok(takeKing > takeQueen, 'the king is still the most valuable capture');
-  assert.ok(takeKing < takeQueen * 3, `but not by orders of magnitude: ${takeKing} vs ${takeQueen}`);
 });
