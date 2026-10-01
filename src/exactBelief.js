@@ -66,12 +66,21 @@
 // placement weights produced boards no real history could reach: a king four
 // squares from home on move 15, never on the square it had castled to.)
 //
-// Exactness is still abandoned (for this game) if a single update runs past a
-// time guard, an update empties P (a sampled P can lose the true position),
-// or the tracker is first attached mid-game — the caller then falls back to
-// the heuristic particle belief (belief.js), and tryReacquire() below can
-// later restore a tight SUPERSET of P once few pieces remain hidden. While
-// |P| = 1 and P is not sampled, the agent literally knows the true position.
+// RUNNING OUT OF TIME. A ply update past the time guard finishes on the parents
+// it reached, a uniformly random subset (see _advanceOpponent), and P is
+// flagged `sampled` as above.
+//
+// LOSING THE SAMPLE. A sampled P can lose every position consistent with what
+// is later seen, and empty. Every input is recorded, so P is then rebuilt by
+// replaying the game into a fresh sample (_rebuild), up to REBUILD_ATTEMPTS
+// times.
+//
+// Exactness is abandoned (for this game) only if those rebuilds all empty too,
+// an exact P empties (which real play cannot do), or the tracker is first
+// attached mid-game — the caller then falls back to the heuristic particle
+// belief (belief.js), and tryReacquire() below can later restore a tight
+// SUPERSET of P once few pieces remain hidden. While |P| = 1 and P is not
+// sampled, the agent literally knows the true position.
 // ---------------------------------------------------------------------------
 
 import {
@@ -84,6 +93,9 @@ import { param, settingsEpoch } from './config.js';
 export const CAP = 1000000;         // paper: |P| usually ≤ 10⁶ (C++); avg ~17k. Past it, P is resampled to CAP/2
 export const TIME_GUARD_MS = 4000;  // per-turn update budget; past it, the update finishes on a random subset of P
 export const REACQUIRE_BOUND = 60000;
+// How many times a sampled P that has lost every consistent position is
+// rebuilt from the game's history before tracking gives up (see _rebuild).
+const REBUILD_ATTEMPTS = 3;
 
 // Effective values (defaults above; see docs/SETTINGS.md). Neither ends
 // tracking any more: past CAP, P is resampled, and past the time guard, the
@@ -920,9 +932,15 @@ export class ExactBelief {
     this._par = new Int8Array(STRIDE);   // the parent being expanded
     this._child = new Int8Array(STRIDE); // the successor being tried
     this._sweeps = 0;                    // seeds each sweep's parent order
+    // Every input the tracker has had, in order, so a sampled P that has lost
+    // every position consistent with what is seen can be rebuilt by replaying
+    // them into a fresh sample (see _rebuild). null once there is no history to
+    // replay: attached mid-game, or re-acquired.
+    this._history = [];
+    this.rebuilds = 0;                   // how many times P was rebuilt from history
   }
 
-  _giveUp() { this.exact = false; this.sampled = false; this.P = null; }
+  _giveUp() { this.exact = false; this.sampled = false; this.P = null; this._history = null; }
 
   /** |P|, or 0 when not tracking. */
   get size() { return this.exact && this.P ? this.P.n : 0; }
@@ -936,6 +954,7 @@ export class ExactBelief {
   }
 
   set positions(list) {
+    this._history = null; // set by hand: there is no history behind it
     if (!list) { this.P = null; return; }
     const P = new PositionStore(Math.max(1, list.length));
     for (const pos of list) P.push(pos, 1 / list.length, hashPos(pos));
@@ -970,25 +989,65 @@ export class ExactBelief {
       this._lastTurnKey = turnKey;
     }
     if (this.exact === false) return;
-    const t0 = Date.now();
     const ctx = obsContext(observation, this.mySign);
     if (!this.firstTurnDone) {
       this.firstTurnDone = true;
       // Exactness needs the full history: only attach at the game's first turn.
       if ((observation.turnNumber ?? 1) !== 1) { this._giveUp(); return; }
+      this.exact = true;
+      this._input({ kind: 'start' });
+      // As black, white has already made one ply.
+      this._input({ kind: this.aiColor === 'black' ? 'ply' : 'see', ctx });
+    } else {
+      this._input({ kind: 'ply', ctx });
+    }
+  }
+
+  // Take one input: record it, apply it, and if that leaves P empty, rebuild
+  // P from the history or give up.
+  //
+  // An EXACT P never empties on real play: the true position is always in it.
+  // A SAMPLED one can, when every position it kept has since been contradicted
+  // by what we saw. That says the sample was unlucky, not that the history is
+  // impossible, so the remedy is another sample: replay every input from the
+  // start, with fresh random draws (_rebuild).
+  _input(op) {
+    if (!this.exact || (op.kind !== 'start' && !this.P)) return;
+    this._history?.push(op);
+    this._apply(op, Date.now());
+    if (this.P.n > 0) return;
+    if (this.sampled && this._history && this._rebuild()) return;
+    this._giveUp();
+  }
+
+  _apply(op, t0) {
+    if (op.kind === 'start') {
       const start = initialPosition();
       this.P = new PositionStore(1);
       this.P.push(start, 1, hashPos(start)); // common knowledge: one world, certainly
-      this.exact = true;
-      if (this.aiColor === 'black') {
-        this._advanceOpponent(ctx, t0); // white has already made one ply
-      } else {
-        this._filter(ctx);
+    } else if (op.kind === 'ply') this._advanceOpponent(op.ctx, t0);
+    else if (op.kind === 'see') this._filter(op.ctx);
+    else if (op.kind === 'move') this._applyOurMove(op.m);
+  }
+
+  // Replay the whole history into a fresh P. Each opponent ply draws its own
+  // parent order and resampling afresh, so a replay is a new, independent
+  // sample of the same belief. It may still lose every consistent position;
+  // REBUILD_ATTEMPTS bounds how often that is retried (a compute budget, like
+  // CAP). Each replayed ply gets the full time guard, so a rebuild can take as
+  // long as the game's updates took so far.
+  _rebuild() {
+    for (let attempt = 0; attempt < REBUILD_ATTEMPTS; attempt++) {
+      this.rebuilds++;
+      this.sampled = false;
+      let ok = true;
+      for (const op of this._history) {
+        this._apply(op, Date.now());
+        if (this.P.n === 0) { ok = false; break; }
       }
-    } else {
-      this._advanceOpponent(ctx, t0);
+      if (ok) return true;
     }
-    if (this.exact && (!this.P || this.P.n === 0)) this._giveUp();
+    return false;
   }
 
   // Drop the members inconsistent with `ctx`, in place, and renormalize.
@@ -1011,14 +1070,17 @@ export class ExactBelief {
    */
   commitOurMove(action) {
     if (!this.exact || !this.P || !action?.from) return;
-    const m = {
+    this._input({ kind: 'move', m: {
       f: sqToIdx(action.from),
       t: sqToIdx(action.to),
       promo: action.payload?.promote ? PIECE_CODE[action.payload.promote] : 0,
       dbl: !!action.isDoublePush,
       ep: action.isEnPassant && action.capturedSquare ? sqToIdx(action.capturedSquare) : -1,
       castle: action.type === 'castle' ? (action.side === 'kingside' ? 1 : 2) : 0,
-    };
+    } });
+  }
+
+  _applyOurMove(m) {
     const P = this.P;
     const next = new PositionStore(Math.max(1, P.n));
     const seen = new HashIndex(P.n);
@@ -1034,7 +1096,6 @@ export class ExactBelief {
       if (at >= 0) { next.w[at] += w; continue; }
       seen.set(h, next.push(child, w, h));
     }
-    if (next.n === 0) { this._giveUp(); return; }
     next.normalize();
     next.trim();
     this.P = next;
@@ -1051,9 +1112,7 @@ export class ExactBelief {
    * observation of the position the move produced.
    */
   observeAfterOurMove(observation) {
-    if (!this.exact || !this.P) return;
-    this._filter(obsContext(observation, this.mySign));
-    if (this.P.n === 0) this._giveUp();
+    this._input({ kind: 'see', ctx: obsContext(observation, this.mySign) });
   }
 
   // One opponent ply: successors of every position under every fog-legal
@@ -1241,6 +1300,7 @@ export class ExactBelief {
     this.exact = true;
     this.approx = true;              // superset, not the literal history-exact P
     this.sampled = false;
+    this._history = null;            // and no history behind it to rebuild from
     this._lastTurnKey = turnKey;     // this turn is done; advance resumes next turn
   }
 

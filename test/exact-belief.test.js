@@ -332,6 +332,45 @@ test('exact belief: out of time, the update finishes on the parents it reached',
   } finally { resetSettings(); }
 });
 
+test('exact belief: a sampled P that loses every consistent position is rebuilt from history', () => {
+  // At a cap of 20k this game's P is a sample by mid-game. Once it is, the test
+  // replaces it with the opening position alone, which nothing seen that deep
+  // fits, so the next turn empties P. The tracker must replay the game into a
+  // fresh sample instead of giving up, and that sample must hold the truth.
+  setOverrides({ chess: { EXACT_BELIEF_CAP: 20000 } });
+  try {
+    const sess = session('2026-07-14T07-37-02-6f908d7b.json');
+    let state = FogChess.createInitialState(sess.params.players, sess.params.config);
+    const opening = fromBoardObject(state.board, null, null);
+    const tracker = new ExactBelief('black');
+    let corrupted = false, checked = false;
+    for (const entry of sess.log) {
+      const pa = entry.playerActions?.[0];
+      if (!pa?.action) break;
+      if (pa.playerId === 'black') {
+        const view = FogChess.getVisibleState(state, 'black');
+        tracker.beginTurn(view, view.turnNumber ?? null);
+        if (corrupted && !checked) {
+          checked = true;
+          assert.equal(tracker.exact, true, 'rebuilt, not given up');
+          assert.equal(tracker.rebuilds, 1);
+          const truth = fromBoardObject(state.board, null, null);
+          const found = tracker.positions.some(p => p.subarray(0, 64).every((c, i) => c === truth[i]));
+          assert.ok(found, 'the rebuilt sample holds the true position');
+        }
+        tracker.commitOurMove(pa.action);
+        if (tracker.sampled && !corrupted) {
+          corrupted = true;
+          tracker.P.n = 1;
+          tracker.P.view(0).set(opening);
+        }
+      }
+      state = FogChess.applyActions(state, [pa]);
+    }
+    assert.ok(checked, 'the game reached a sampled P and the turn after it');
+  } finally { resetSettings(); }
+});
+
 test('exact belief: attaching mid-game gives up gracefully', () => {
   const state = FogChess.createInitialState(
     [{ id: 'white', name: 'W' }, { id: 'black', name: 'B' }],

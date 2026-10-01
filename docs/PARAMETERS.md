@@ -127,10 +127,10 @@ setting:
 Two trackers, always kept in lockstep (`ChessGame.sampleWorlds`): the **exact**
 position-set tracker `P` (`exactBelief.js`) is preferred and, while it holds,
 *is* the paper's belief; the **heuristic particle** tracker (`belief.js`) is
-the fallback once exactness is lost (a resampled P lost the true position, or
-the tracker was attached mid-game). Neither P outgrowing its cap nor the time
-guard tripping loses it any more: P becomes a sample instead (see `CAP` and
-`TIME_GUARD_MS`).
+the fallback once exactness is lost: the tracker was attached mid-game, or a
+sampled P emptied and three rebuilds from the game's history emptied too.
+Neither P outgrowing its cap nor the time guard tripping loses it: P becomes a
+sample instead (see `CAP` and `TIME_GUARD_MS`).
 
 **Exact belief (`src/exactBelief.js`)**
 
