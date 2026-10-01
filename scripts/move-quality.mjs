@@ -56,12 +56,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCorpus, describeCorpus } from '../src/corpus.js';
 import { FogChess } from '../src/FogChess.js';
-import { ChessObscuroAgent, makeChessLeafEval, getLeafEvalStats, resetLeafEvalStats, setGame } from '../src/ObscuroAgent.js';
+import { ChessObscuroAgent, makeChessLeafEval, getLeafEvalStats, resetLeafEvalStats, setGame, setLeafValue } from '../src/ObscuroAgent.js';
 import {
   setBeliefSampleAlphaForSeat, setMovePriorForSeat, setBeliefReachWeightingForSeat,
 } from '../src/exactBelief.js';
 import { makeMovePrior, UNIFORM_PRIOR, FITTED_WEIGHTS } from '../src/movePrior.js';
-import { quit as stockfishQuit, setFreshHash, setAutoRecycle, recycleEngine } from '../src/stockfish.js';
+import { quit as stockfishQuit, setFreshHash, setAutoRecycle, recycleEngine, setCacheDir } from '../src/stockfish.js';
 import { applyCliSettings, maybePrintConfig, makeArgReader } from '../src/cli.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -70,7 +70,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // pipeline and nowhere near enough to draw a conclusion from. Point --sessions
 // at a real corpus for that (battle-simulator keeps its recorded games in its
 // own untracked sessions/ directory).
-const { rest: argv, printConfig } = applyCliSettings();
+// THE BELIEF MUST NOT DEPEND ON THE CLOCK. Past its time guard an exact-belief
+// update finishes on the parents it reached (exactBelief.js _advanceOpponent),
+// so two arms replaying the same history could hold different P — measured: 15
+// of 60 positions in one game, near |P| = 10⁶. The guard is raised to an hour
+// here unless --set names it, which keeps P a function of the history alone.
+const cliArgs = process.argv.slice(2);
+const guardSet = cliArgs.some(a => a.includes('EXACT_BELIEF_TIME_GUARD_MS'));
+const { rest: argv, printConfig } = applyCliSettings(
+  guardSet ? cliArgs : ['--set', 'chess.EXACT_BELIEF_TIME_GUARD_MS=3600000', ...cliArgs]);
 await maybePrintConfig(printConfig);
 const arg = makeArgReader(argv);
 const SESSIONS = arg('sessions', join(HERE, '..', 'test', 'fixtures'));
@@ -159,6 +167,18 @@ setFreshHash(arg('fresh-hash', '1') !== '0');
 // decision back to the engine's call counter (fast, unsound). With it off, heap
 // safety rides on one replay staying under the WASM abort — see setAutoRecycle.
 setAutoRecycle(arg('auto-recycle', '0') !== '0');
+// A CACHE OF ITS OWN. Everything else that runs the engine — the test suite,
+// a game, the analysis panel — writes to the shared cache WITHOUT fresh hash, so
+// its entries depend on what the engine had searched before. An arm that reads
+// one of those, where the other arm (after an LRU eviction) recomputes it fresh,
+// sees a different evaluation of the same position: a null control run straight
+// after `npm test` came back at 85.8% agreement, and at 100.0% once nothing else
+// had written to the cache. So this harness keeps its own, unless one is named.
+if (!process.env.SF_CACHE_DIR && !cliArgs.some(a => a.includes('SF_CACHE_DIR'))) {
+  const dir = join(HERE, '..', 'vendor', 'stockfish', 'move-quality');
+  (await import('node:fs')).mkdirSync(dir, { recursive: true });
+  setCacheDir(dir);
+}
 // --verbose prints per-ply cost, which is how the ms/move mystery got solved.
 const VERBOSE = argv.includes('--verbose');
 const seatArg = arg('seat', 'both');
@@ -187,6 +207,14 @@ const ARMS = {
   prior: {
     a: { label: 'fitted π, α=1', alpha: 1, prior: makeMovePrior(FITTED_WEIGHTS) },
     b: { label: 'uniform π, α=1', alpha: 1, prior: UNIFORM_PRIOR },
+  },
+  // The scale the search values leaves on: the engine's win/draw/loss as a
+  // bounded utility in [−1, +1], against centipawns clamped at LEAF_CLAMP with a
+  // win worth SEARCH_WIN. At the shipped α. The REFERENCE is centipawns either
+  // way (referencesFor), so both arms are scored on the same yardstick.
+  values: {
+    a: { label: 'wdl values', alpha: 1, leafValue: 'wdl' },
+    b: { label: 'cp values', alpha: 1, leafValue: 'cp' },
   },
 };
 const arm = ARMS[armName];
@@ -292,7 +320,7 @@ setGame(REPLAY_GAME);
  * and a diverging game would compare two different sets of positions.
  */
 async function replayArm(sess, seat, spec, seed) {
-  const { alpha, prior, sfDepth, rounds, reach, leafEval } = spec;
+  const { alpha, prior, sfDepth, rounds, reach, leafEval, leafValue } = spec;
   // Fresh ENGINE, unconditionally — protocol note 4, and the counterpart of the
   // fresh agent and fresh players array below. Every arm of every game/seat
   // starts the engine from the same state, so a respawn can never land at a
@@ -306,6 +334,7 @@ async function replayArm(sess, seat, spec, seed) {
   setBeliefSampleAlphaForSeat(seat, alpha ?? 0);
   setMovePriorForSeat(seat, prior ?? null);
   setBeliefReachWeightingForSeat(seat, reach ?? null);
+  setLeafValue(leafValue ?? null);
   const agent = new ChessObscuroAgent({
     rng: mulberry32(seed), ...knobs,
     ...(sfDepth ? { sfDepth } : {}), ...(rounds ? { maxRounds: rounds } : {}),
@@ -347,6 +376,7 @@ async function replayArm(sess, seat, spec, seed) {
   setBeliefSampleAlphaForSeat(seat, null);
   setMovePriorForSeat(seat, null);
   setBeliefReachWeightingForSeat(seat, null);
+  setLeafValue(null);
   return { picks, searchMs };
 }
 
@@ -374,6 +404,12 @@ async function referenceAt(state, seat) {
 }
 
 /** Walk the game once with no agent, collecting the reference at each seat turn. */
+// TWO YARDSTICKS, both on the true board at the reference depth: centipawns
+// (the long-standing one, clipped at CLIP) and the engine's expected score.
+// They disagree exactly where it matters for comparing value scales: dropping
+// from +800 to +500 in a won position is a 300 cp "loss" and no loss of result.
+// The second costs almost nothing, since the engine lines it reads are the
+// same cached MultiPV calls the first one made.
 async function referencesFor(sess, seat) {
   const players = JSON.parse(JSON.stringify(sess.params.players));
   let state = FogChess.createInitialState(players, sess.params.config);
@@ -384,12 +420,16 @@ async function referencesFor(sess, seat) {
     if (!pa?.action) break;
     if (pa.playerId === seat) {
       const tr = Date.now();
+      setLeafValue('cp');
       const r = await referenceAt(state, seat);
+      setLeafValue('wdl');
+      if (r) r.u = await referenceAt(state, seat);
       if (VERBOSE) process.stdout.write(`      ply ${i} REFERENCE ${Date.now() - tr} ms (${r?.n ?? 0} moves)\n`);
       if (r) refs.set(i, r);
     }
     state = FogChess.applyActions(state, [pa]);
   }
+  setLeafValue(null);
   return refs;
 }
 
@@ -552,7 +592,9 @@ if (argv.includes('--grid')) {
 
 // --- run ---------------------------------------------------------------------
 
-const stats = { a: [], b: [], diffs: [], aTop: 0, bTop: 0, n: 0, same: 0, rows: [], pMismatch: 0 };
+const stats = { a: [], b: [], diffs: [], aTop: 0, bTop: 0, n: 0, same: 0, rows: [], pMismatch: 0,
+  // Expected-score loss, in percentage points of expected score per move.
+  ua: [], ub: [], udiffs: [] };
 const armDumpHead = () => 'arm,a_label,b_label,game,seat,ply,p_size,p_size_b,loss_a,loss_b,diff,same\n';
 const armDumpRows = () => stats.rows.map(r => [
   armName, JSON.stringify(arm.a.label), JSON.stringify(arm.b.label), JSON.stringify(r.game), r.seat, r.ply,
@@ -591,6 +633,11 @@ for (let g = 0; g < games.length; g++) {
       if (sa === undefined || sb === undefined) continue;
       const la = clipLoss(ref.best - sa), lb = clipLoss(ref.best - sb);
       stats.a.push(la); stats.b.push(lb); stats.diffs.push(la - lb);
+      const ua = ref.u?.byKey.get(ka), ub = ref.u?.byKey.get(kb);
+      if (ua !== undefined && ub !== undefined) {
+        const xa = (ref.u.best - ua) * 50, xb = (ref.u.best - ub) * 50; // utility is 2·score − 1
+        stats.ua.push(xa); stats.ub.push(xb); stats.udiffs.push(xa - xb);
+      }
       if (la === 0) stats.aTop++;
       if (lb === 0) stats.bTop++;
       if (ka === kb) stats.same++;
@@ -642,6 +689,17 @@ const dec = wins + losses;
 if (dec > 0) {
   const z = (wins - dec / 2) / Math.sqrt(dec * 0.25);
   console.log(`SIGN TEST over the ${dec} decisive positions: A better ${(100 * wins / dec).toFixed(1)}%  (z = ${z.toFixed(2)})`);
+}
+if (stats.udiffs.length) {
+  const du = mean(stats.udiffs), seu = stderr(stats.udiffs);
+  const uw = stats.udiffs.filter(x => x < 0).length, ul = stats.udiffs.filter(x => x > 0).length;
+  console.log(`\nEXPECTED-SCORE LOSS against the engine's win/draw/loss on the true board (points of %, per move):`);
+  console.log(`mean  A ${mean(stats.ua).toFixed(2)}   B ${mean(stats.ub).toFixed(2)}   median A ${median(stats.ua).toFixed(2)}   B ${median(stats.ub).toFixed(2)}`);
+  console.log(`PAIRED DIFFERENCE (A − B, negative favours A): ${du.toFixed(3)} ± ${seu.toFixed(3)}  (z = ${(du / seu).toFixed(2)})`);
+  if (uw + ul > 0) {
+    const zu = (uw - (uw + ul) / 2) / Math.sqrt((uw + ul) * 0.25);
+    console.log(`SIGN TEST over the ${uw + ul} decisive positions: A better ${(100 * uw / (uw + ul)).toFixed(1)}%  (z = ${zu.toFixed(2)})`);
+  }
 }
 // --- does the effect depend on how much is hidden? ---------------------------
 //

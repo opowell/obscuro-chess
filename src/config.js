@@ -110,6 +110,7 @@ export const SETTING_PATHS = {
     },
     LEAF_CLAMP: n,
     SEARCH_WIN: n,
+    LEAF_VALUE: s,
     MAX_SF_DEPTH: n,
     CHESS_AGENT_DIAL: {
       depth: d, noiseCp: n, noiseZeroAt: n, quiesceFrom: n,

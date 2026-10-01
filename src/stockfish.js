@@ -87,7 +87,8 @@ const BROWSER_ENGINE_URL = isBrowser
 // keyed by (fen, multipv, depth) but their CONTENT came from the buggy parser, so
 // they have to be invalidated like an engine change. Bump this for any change
 // that alters what a given query returns, not just for a new engine.
-const ENGINE_TAG = 'sf18l-mpv3';
+// Bumped 2026-10-01: multiPV rows now carry the engine's win/draw/loss too.
+const ENGINE_TAG = 'sf18l-mpv4-wdl';
 
 let worker = null;
 let readyPromise = null;
@@ -556,8 +557,11 @@ export async function evaluate(fen, { movetime = 100 } = {}) {
 /**
  * Evaluate the top `multipv` moves of a position in a single call — the paper's
  * batched node heuristic ("MultiPV at low depth gives evaluations for all
- * children at once"). Returns [{ move, cp }] with scores from the side-to-move's
- * perspective, or null. Used to score the fog subgame's leaves cheaply.
+ * children at once"). Returns [{ move, cp, wdl }] with scores from the
+ * side-to-move's perspective, or null: `cp` in centipawns (mate as ±(100000 − n)),
+ * and `wdl` as the engine's own [win, draw, loss] in per mille (UCI_ShowWDL),
+ * which is what the search values leaves by. Used to score the fog subgame's
+ * leaves cheaply.
  *
  * `onInfo({ depth, candidates })` is optional and fires once per completed
  * iterative-deepening depth (as Stockfish's own `info depth N ...` lines
@@ -591,16 +595,17 @@ export async function multiPV(fen, { multipv = 10, depth = 2, onInfo, isCancelle
   // sweep to fill any gap if the deepest one is cut short. Deeper values win;
   // coverage never regresses.
   let curDepth = 0;
-  let cur = new Map();   // move -> cp, current depth sweep
-  let prev = new Map();  // move -> cp, last depth sweep that finished
+  let cur = new Map();   // move -> { cp, wdl }, current depth sweep
+  let prev = new Map();  // move -> { cp, wdl }, last depth sweep that finished
   const merged = () => {
     const out = new Map(prev);
-    for (const [m, cp] of cur) out.set(m, cp);
-    return [...out].map(([move, cp]) => ({ move, cp }));
+    for (const [m, line] of cur) out.set(m, line);
+    return [...out].map(([move, { cp, wdl }]) => ({ move, cp, wdl }));
   };
   let lastReportedDepth = 0;
   let stopped = false;
-  const cmds = [...freshHashCmds(), `setoption name MultiPV value ${multipv}`, 'position fen ' + fen, 'go depth ' + depth];
+  const cmds = [...freshHashCmds(), 'setoption name UCI_ShowWDL value true',
+    `setoption name MultiPV value ${multipv}`, 'position fen ' + fen, 'go depth ' + depth];
   const result = await request(
     cmds,
     (line) => {
@@ -608,13 +613,14 @@ export async function multiPV(fen, { multipv = 10, depth = 2, onInfo, isCancelle
       const mpv = line.match(/ multipv (\d+) /);
       const sc = line.match(/ score (cp|mate) (-?\d+)/);
       const pv = line.match(/ pv (\S+)/);
+      const wdl = line.match(/ wdl (\d+) (\d+) (\d+)/);
       if (mpv && sc && pv) {
         const d = dm ? Number(dm[1]) : curDepth;
         if (d > curDepth) { if (cur.size) prev = cur; cur = new Map(); curDepth = d; }
         const cp = sc[1] === 'cp'
           ? Number(sc[2])
           : (Number(sc[2]) > 0 ? 100000 - Number(sc[2]) : -100000 - Number(sc[2]));
-        cur.set(pv[1], cp);
+        cur.set(pv[1], { cp, wdl: wdl ? [Number(wdl[1]), Number(wdl[2]), Number(wdl[3])] : null });
       }
       if (onInfo && dm && mpv?.[1] === '1') {
         const d = Number(dm[1]);

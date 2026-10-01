@@ -28,6 +28,7 @@ export {
   ANALYSIS_DEFAULTS,
   LEAF_CLAMP,
   SEARCH_WIN,
+  LEAF_VALUE,
   MAX_SF_DEPTH,
 } from './ObscuroAgent.js';
 

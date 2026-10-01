@@ -119,7 +119,62 @@ export const SEARCH_WIN = 8000;
 // +LEAF_CLAMP cap on *capturing the enemy* king at a LEAF: an imagined capture
 // is phantom-prone and must not be banked on, while exposing our own king is a
 // real, self-inflicted loss we must avoid.
-const kingHang = () => searchWin();
+const kingHang = () => winValue();
+
+// LEAF VALUES — what a position is worth, to the side to move or the side that
+// just moved, on one of two scales:
+//
+//   'wdl' — the engine's own expected result: (wins − losses) / 1000 from its
+//           win/draw/loss estimate (UCI_ShowWDL), so every value is in [−1, +1],
+//           a captured king is +1 and a hung one −1. These are the paper's
+//           bounded utilities (u: Z → [−1, +1]) with nothing hand-picked: the
+//           engine's evaluation already IS a chance of winning, so no clamp and
+//           no constant deciding what a win is worth against an evaluation.
+//   'cp'  — centipawns clamped to ±LEAF_CLAMP, with a win worth SEARCH_WIN.
+//           The hand-picked scale this engine used until 2026-10.
+export const LEAF_VALUE = 'cp';
+// A process-wide override of the setting, for a harness that runs both scales
+// in one process (move-quality.mjs's `values` arm); null defers to the setting.
+let leafValueOverride = null;
+export function setLeafValue(mode) { leafValueOverride = mode ?? null; }
+const wdlValues = () => (leafValueOverride ?? param('chess.LEAF_VALUE', LEAF_VALUE)) === 'wdl';
+
+// The terminal win: +1 on the bounded scale, SEARCH_WIN on the centipawn one.
+function winValue() { return wdlValues() ? 1 : searchWin(); }
+
+// An engine line's value to the side to move in the position it was asked
+// about. `board` is that position, for the rare line without a win/draw/loss.
+function lineValue({ cp, wdl }, board) {
+  if (!wdlValues()) return clip(cp);
+  if (wdl) return (wdl[0] - wdl[2]) / 1000;
+  return approxUtility(cp, board);
+}
+
+// A centipawn score from something other than the engine — the static
+// evaluator standing in for an unanswered child, or the distilled value net —
+// on the current scale. `board` is the position it scores.
+function cpValue(cp, board) { return wdlValues() ? approxUtility(cp, board) : clip(cp); }
+
+// Stockfish 17's published win-rate model (uci.cpp, win_rate_params), for the
+// values the engine gave no win/draw/loss for. An APPROXIMATION of the engine
+// this package ships (Stockfish 18), whose own model was refitted: over 840
+// MultiPV lines from the test fixtures it reproduces SF18's reported win and
+// loss rates to within 25‰ (mean 4‰). It is used only where the engine did not
+// answer, which is a handful of leaves per game.
+const WR_A = [-13.50030198, 40.92780883, -36.82753545, 386.83004070];
+const WR_B = [96.53354896, -165.79058388, 90.89679019, 49.29561889];
+const MATERIAL = { pawn: 1, knight: 3, bishop: 3, rook: 5, queen: 9 };
+function approxUtility(cp, board) {
+  if (cp >= 90000) return 1;   // mate, as multiPV encodes it
+  if (cp <= -90000) return -1;
+  let material = 0;
+  for (const sq of Object.keys(board ?? {})) { const p = board[sq]; if (p) material += MATERIAL[p.type] ?? 0; }
+  const m = Math.min(Math.max(material, 17), 78) / 58;
+  const a = ((WR_A[0] * m + WR_A[1]) * m + WR_A[2]) * m + WR_A[3];
+  const b = ((WR_B[0] * m + WR_B[1]) * m + WR_B[2]) * m + WR_B[3];
+  const v = cp * a / 100; // UCI centipawns are the internal value normalized by a
+  return 1 / (1 + Math.exp((a - v) / b)) - 1 / (1 + Math.exp((a + v) / b));
+}
 
 const otherColor = c => (c === 'white' ? 'black' : 'white');
 
@@ -199,6 +254,12 @@ function engineWouldRefuse(board, mover) {
   return kingsAdjacent(findKingSquare(board, mover), theirK);
 }
 
+// NO MOVES. Asked about a child where the opponent has no legal move in
+// standard chess (checkmate or stalemate), the engine answers with no lines at
+// all. Under fog rules the opponent must still move, every move leaves its king
+// capturable, and in this world (where everything is known) the mover then
+// takes it: a win for the mover, valued as one rather than guessed at by the
+// static evaluator.
 async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled }) {
   const them = otherColor(mover);
   const out = new Array(actions.length);
@@ -234,8 +295,12 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
         pv = await multiPV(toFEN(cs.board, cs.gameSpecific, side, cs.turnNumber ?? 1),
           { multipv: 1, depth: sfDepth, isCancelled, onStopped: () => { truncated = true; } });
       } catch { pv = null; }
-      if (pv?.length && typeof pv[0].cp === 'number') {
-        out[i] = clip(-pv[0].cp);
+      if (Array.isArray(pv) && pv.length === 0) {
+        out[i] = winValue(); // no legal move for them: see NO MOVES above
+        priced.add(i);
+        leafStats.engineLeaves++;
+      } else if (pv?.length && typeof pv[0].cp === 'number') {
+        out[i] = -lineValue(pv[0], cs.board);
         priced.add(i);
         leafStats.engineLeaves++;
       }
@@ -244,7 +309,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     for (const i of need) {
       if (priced.has(i)) continue;
       leafStats.fallbackLeaves++;
-      out[i] = clip(evaluate(childStates[i].board, mover));
+      out[i] = cpValue(evaluate(childStates[i].board, mover), childStates[i].board);
     }
     leafStats.refusedNodes++;
     if (truncated) leafStats.truncated++;
@@ -272,7 +337,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
           });
       } catch { pv = null; }
     }
-    const cpByIdx = new Map();
+    const valueByIdx = new Map(); // child index → its value to the mover
     // Categorise WHY a node loses values, so the residual fallback rate can be
     // attributed instead of guessed at: engine said nothing / said less than we
     // asked / said plenty but not about our moves.
@@ -280,12 +345,12 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     else if (pv.length < need.length) leafStats.pvShortNodes++;
     if (pv && pv.length) {
       engineOk = !truncated;
-      for (const { move, cp } of pv) {
-        const a = uciToAction(move, actions);
-        if (a) { const i = actions.indexOf(a); if (i >= 0) cpByIdx.set(i, cp); }
+      for (const line of pv) {
+        const a = uciToAction(line.move, actions);
+        if (a) { const i = actions.indexOf(a); if (i >= 0) valueByIdx.set(i, lineValue(line, state.board)); }
       }
     }
-    if (pv && pv.length && cpByIdx.size < need.length) leafStats.unmappedNodes++;
+    if (pv && pv.length && valueByIdx.size < need.length) leafStats.unmappedNodes++;
     // Moves the engine did not list for the parent, because standard chess has
     // no such move: castling through an attacked square (legal under fog), or a
     // push this world's board blocks (an embedder's action set can hold one;
@@ -297,7 +362,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     // level with real moves.
     if (pv && pv.length && !truncated) {
       const side = them === 'white' ? 'w' : 'b';
-      const unpriced = need.filter(i => !cpByIdx.has(i));
+      const unpriced = need.filter(i => !valueByIdx.has(i));
       for (const i of unpriced) {
         const cs = childStates[i];
         if (engineWouldRefuse(cs.board, them)) continue;
@@ -307,23 +372,24 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
             { multipv: 1, depth: sfDepth, isCancelled, onStopped: () => { truncated = true; } });
         } catch { childPv = null; }
         if (truncated) break;
-        if (childPv?.length && typeof childPv[0].cp === 'number') cpByIdx.set(i, -childPv[0].cp);
+        if (Array.isArray(childPv) && childPv.length === 0) valueByIdx.set(i, winValue()); // NO MOVES
+        else if (childPv?.length && typeof childPv[0].cp === 'number') valueByIdx.set(i, -lineValue(childPv[0], cs.board));
       }
       if (truncated) engineOk = false;
     }
-    if (process.env?.OBSCURO_DEBUG_FALLBACK && cpByIdx.size < need.length
+    if (process.env?.OBSCURO_DEBUG_FALLBACK && valueByIdx.size < need.length
         && leafStats.calls % Number(process.env.OBSCURO_DEBUG_FALLBACK || 1) === 0) {
       const side = mover === 'white' ? 'w' : 'b';
       console.error(`[fallback] actions=${actions.length} need=${need.length} pv=${pv?.length ?? 'null'} ` +
-        `mapped=${cpByIdx.size} depth=${sfDepth} cols=${cols}\n  fen: ` +
+        `mapped=${valueByIdx.size} depth=${sfDepth} cols=${cols}\n  fen: ` +
         toFEN(state.board, state.gameSpecific, side, state.turnNumber ?? 1) +
-        `\n  unpriced: ` + need.filter(i => !cpByIdx.has(i)).slice(0, 8)
+        `\n  unpriced: ` + need.filter(i => !valueByIdx.has(i)).slice(0, 8)
           .map(i => `${actions[i].from}${actions[i].to}${actions[i].type === 'castle' ? '(O-O)' : ''}`).join(' '));
     }
     for (const i of need) {
-      const fromEngine = cpByIdx.has(i);
+      const fromEngine = valueByIdx.has(i);
       if (fromEngine) leafStats.engineLeaves++; else leafStats.fallbackLeaves++;
-      out[i] = fromEngine ? clip(cpByIdx.get(i)) : clip(evaluate(childStates[i].board, mover));
+      out[i] = fromEngine ? valueByIdx.get(i) : cpValue(evaluate(childStates[i].board, mover), childStates[i].board);
     }
     leafStats.calls++;
     if (truncated) leafStats.truncated++;
@@ -369,7 +435,7 @@ export function makeNetLeafEval(net) {
       const board = (childStates?.[i] ?? state).board;
       const k = findKingSquare(board, mover);
       if (!k || isAttackedBy(board, k, them)) { out[i] = -kingHang(); continue; }
-      out[i] = clip(-net.evalBoard(board, themChar));
+      out[i] = -cpValue(net.evalBoard(board, themChar), board);
     }
     return out;
   };
@@ -466,7 +532,7 @@ export class ChessObscuroAgent extends GenericObscuroAgent {
   }
 
   // Bounded terminal value for the fog search (see SEARCH_WIN above).
-  _winValue() { return searchWin(); }
+  _winValue() { return winValue(); }
 
   // Chess's batched Stockfish node heuristic, its depth/width scaled by the dial.
   // The paper runs its leaf evaluation at DEPTH 1 (App. C.5) and gets its
@@ -628,16 +694,20 @@ export class ChessObscuroAgent extends GenericObscuroAgent {
       const pv = await multiPV(fen, { multipv, depth });
       if (!pv || !pv.length) return null;
 
-      // cp (mover's perspective) → win probability in (0,1). Mate scores saturate.
-      const winProb = cp => (cp >= 90000 ? 1 : cp <= -90000 ? 0 : 1 / (1 + Math.pow(10, -cp / 400)));
+      // A line's chance of winning, in (0,1), from the mover's perspective. On
+      // the bounded scale it is the engine's own expected score (a draw counts
+      // half); on the centipawn one, the Elo logistic. Mate scores saturate.
+      const winProb = ({ cp, wdl }) => (wdlValues() && wdl ? (wdl[0] + wdl[1] / 2) / 1000
+        : cp >= 90000 ? 1 : cp <= -90000 ? 0 : 1 / (1 + Math.pow(10, -cp / 400)));
       // β: 0 → uniform, betaAtHalf at t=0.5 → probability ∝ win-prob, betaMax at t=1 → near-best.
       const beta = t <= 0.5 ? (t / 0.5) * betaAtHalf : (betaAtHalf + (t - 0.5) / 0.5 * (betaMax - betaAtHalf));
 
       const scored = [];
-      for (const { move, cp } of pv) {
+      for (const line of pv) {
+        const { move, cp } = line;
         const a = uciToAction(move, legalActions);
         if (!a) continue;
-        const wp = winProb(cp);
+        const wp = winProb(line);
         scored.push({ action: a, cp, weight: Math.pow(wp, beta) });
       }
       if (!scored.length) return null;
@@ -751,7 +821,7 @@ export async function obscuroStrategy(state, legalActions, opts = {}) {
   // gadget then chases whichever belief world leaves the enemy king capturable,
   // and the analysis ranked a bishop sacrifice first (97%) in a position where
   // the agent itself would never play it.
-  const hooks = makeHooks(game, me, { rng, win: searchWin() });
+  const hooks = makeHooks(game, me, { rng, win: winValue() });
   const opp =(state.players ?? []).find(p => p.id !== me)?.id ?? null;
   // Live "round N/M" progress (lichess-style depth ticks, but for CFR rounds) —
   // purely a side channel; see runObscuroSearch's cfg.onRound.

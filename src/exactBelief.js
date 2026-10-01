@@ -896,6 +896,18 @@ class HashIndex {
   }
 }
 
+// A fixed-seed generator, so resampling — like the parent order below — is a
+// function of the tracker's inputs and replays identically.
+function seededRng(seed) {
+  let s = seed | 0;
+  return () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // A fixed-seed shuffle of 0..n-1, so a sweep that must stop early has looked at
 // a uniformly random subset of parents, and the same inputs still give the same
 // result.
@@ -1195,7 +1207,7 @@ export class ExactBelief {
         if (at >= 0) { next.w[at] += w; continue; }
         seen.set(h, next.push(child, w, h));
         if (next.n > cap()) {
-          const kept = resample(next.w.subarray(0, next.n), Math.max(1, Math.floor(cap() / 2)));
+          const kept = resample(next.w.subarray(0, next.n), Math.max(1, Math.floor(cap() / 2)), seededRng(this._sweeps * 7919 + next.n));
           next.keep(kept.indices, kept.weights);
           seen = HashIndex.of(next);
           this.sampled = true;
