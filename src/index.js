@@ -26,10 +26,10 @@ export { playMatch } from './playMatch.js';
 // --- Agents ---------------------------------------------------------------
 export {
   ChessObscuroAgent, ObscuroAgent, setGame, getGame,
-  obscuroStrategy, analyzeObscuro, analyzeObscuroProgressive, cpSumsOverWorlds,
+  obscuroStrategy, analyzeObscuro, analyzeObscuroProgressive, scoreSumsOverWorlds,
   makeChessLeafEval, makeIterativeChessLeafEval,
   getLeafEvalStats, resetLeafEvalStats,
-  CHESS_DIAL, ANALYSIS_DEFAULTS, LEAF_CLAMP, SEARCH_WIN, MAX_SF_DEPTH,
+  CHESS_DIAL, ANALYSIS_DEFAULTS, MAX_SF_DEPTH,
 } from './ObscuroAgent.js';
 
 export {

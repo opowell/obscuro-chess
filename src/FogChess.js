@@ -188,7 +188,7 @@ export const FogChess = {
   // where OUR move self-checks (exactly the dangerous ones!) the move vanishes
   // from that world's action set and is scored as a neutral pass, so a real
   // king-hang gets priced at material value. Self-check is instead handled by
-  // the VALUE model: such children evaluate to −SEARCH_WIN for the mover
+  // the VALUE model: such children evaluate to −1, a loss, for the mover
   // (src/ObscuroAgent.js), new infosets seed to the best child, and CFR then
   // keeps suicide moves out of both players' strategies.
 

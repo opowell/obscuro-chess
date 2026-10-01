@@ -18,7 +18,7 @@ import {
 } from '../src/config.js';
 import { FogChess } from '../src/FogChess.js';
 import {
-  ChessObscuroAgent, ObscuroAgent, CHESS_DIAL, LEAF_CLAMP,
+  ChessObscuroAgent, ObscuroAgent, CHESS_DIAL, MAX_SF_DEPTH,
 } from '../src/ObscuroAgent.js';
 import { DEFAULT_DIFFICULTY, difficultyToNumber, quit as stockfishQuit } from '../src/stockfish.js';
 import { getDefaultMovePrior, setDefaultMovePrior } from '../src/exactBelief.js';
@@ -85,14 +85,14 @@ test('the settable key space is exactly the two settings.js aggregates', () => {
 });
 
 test('an unknown key is rejected, with the near miss named', () => {
-  assert.throws(() => validate({ chess: { LEAF_CLAM: 900 } }),
-    /unknown key "chess.LEAF_CLAM" — did you mean "LEAF_CLAMP"\?/);
+  assert.throws(() => validate({ chess: { MAX_SF_DEPT: 12 } }),
+    /unknown key "chess.MAX_SF_DEPT" — did you mean "MAX_SF_DEPTH"\?/);
   assert.throws(() => validate({ chess: { MIN_SUPPORT_PROB: 0.5 } }),
     /is a generic-search knob; write it as "search.MIN_SUPPORT_PROB"/);
-  assert.throws(() => validate({ search: { LEAF_CLAMP: 900 } }),
-    /is a fog-chess knob; write it as "chess.LEAF_CLAMP"/);
-  assert.throws(() => validate({ chess: { LEAF_CLAMP: 'nope' } }),
-    /chess.LEAF_CLAMP must be a number/);
+  assert.throws(() => validate({ search: { MAX_SF_DEPTH: 12 } }),
+    /is a fog-chess knob; write it as "chess.MAX_SF_DEPTH"/);
+  assert.throws(() => validate({ chess: { MAX_SF_DEPTH: 'nope' } }),
+    /chess.MAX_SF_DEPTH must be a number/);
   assert.throws(() => validate({ search: { DIAL: { power: { worlds: { mn: 1 } } } } }),
     /is not a dial field/);
   assert.throws(() => validate({ search: { DIAL: { power: { worlds: { curve: 'wiggly' } } } } }),
@@ -149,11 +149,11 @@ test('time mode scales off aiTimeMs, and the user limit stays the budget', () =>
 });
 
 test('a plain chess constant is settable and read at use time', () => {
-  assert.equal(param('chess.LEAF_CLAMP', LEAF_CLAMP), 1500);
-  setOverrides({ chess: { LEAF_CLAMP: 900 } });
-  assert.equal(param('chess.LEAF_CLAMP', LEAF_CLAMP), 900);
+  assert.equal(param('chess.MAX_SF_DEPTH', MAX_SF_DEPTH), 30);
+  setOverrides({ chess: { MAX_SF_DEPTH: 12 } });
+  assert.equal(param('chess.MAX_SF_DEPTH', MAX_SF_DEPTH), 12);
   resetSettings();
-  assert.equal(param('chess.LEAF_CLAMP', LEAF_CLAMP), 1500);
+  assert.equal(param('chess.MAX_SF_DEPTH', MAX_SF_DEPTH), 30);
 });
 
 test('a nested default is deep-merged, not replaced', () => {
@@ -278,11 +278,11 @@ test('an auto-discovered file in the working directory is picked up', async () =
   const cwd = process.cwd();
   try {
     writeFileSync(join(dir, 'obscuro-chess.settings.json'),
-      JSON.stringify({ chess: { LEAF_CLAMP: 777 } }));
+      JSON.stringify({ chess: { MAX_SF_DEPTH: 7 } }));
     process.chdir(dir);
     rediscoverSettings();
-    assert.equal(param('chess.LEAF_CLAMP', LEAF_CLAMP), 777);
-    assert.equal(settingsProvenance().get('chess.LEAF_CLAMP')?.startsWith('file:'), true);
+    assert.equal(param('chess.MAX_SF_DEPTH', MAX_SF_DEPTH), 7);
+    assert.equal(settingsProvenance().get('chess.MAX_SF_DEPTH')?.startsWith('file:'), true);
   } finally {
     process.chdir(cwd);
     resetSettings();
@@ -313,9 +313,9 @@ test('lastAnalysis reports which parameters were not left at their defaults', as
   const clean = await analysisFor(fogState());
   assert.equal(clean.overrides, undefined, 'a default configuration reports nothing');
 
-  setOverrides({ chess: { LEAF_CLAMP: 900 } });
+  setOverrides({ chess: { MAX_SF_DEPTH: 12 } });
   const dirty = await analysisFor(fogState(), { particles: 3 });
-  assert.equal(dirty.overrides['chess.LEAF_CLAMP'], 'cli');
+  assert.equal(dirty.overrides['chess.MAX_SF_DEPTH'], 'cli');
   assert.equal(dirty.overrides['opts.particles'], 'agent');
 });
 
@@ -324,14 +324,14 @@ test('lastAnalysis reports which parameters were not left at their defaults', as
 // ---------------------------------------------------------------------------
 
 test('resolvedConfig reports every parameter with its provenance', async () => {
-  setOverrides({ chess: { LEAF_CLAMP: 900 } });
+  setOverrides({ chess: { MAX_SF_DEPTH: 12 } });
   const rows = await resolvedConfig();
   const byPath = new Map(rows.map(r => [r.path, r]));
 
-  assert.equal(byPath.get('chess.LEAF_CLAMP').value, 900);
-  assert.equal(byPath.get('chess.LEAF_CLAMP').source, 'cli');
-  assert.equal(byPath.get('chess.SEARCH_WIN').value, 8000);
-  assert.equal(byPath.get('chess.SEARCH_WIN').source, 'default');
+  assert.equal(byPath.get('chess.MAX_SF_DEPTH').value, 12);
+  assert.equal(byPath.get('chess.MAX_SF_DEPTH').source, 'cli');
+  assert.equal(byPath.get('chess.DEFAULT_DIFFICULTY').value, 25);
+  assert.equal(byPath.get('chess.DEFAULT_DIFFICULTY').source, 'default');
   // Defaults come from the aggregates, so nested ones are reported leaf by leaf.
   assert.equal(byPath.get('search.DIAL.power.worlds.max').value, 48);
 });
@@ -368,9 +368,9 @@ test('a derived value is re-derived when settings change, not frozen', () => {
 test('setPath writes a dotted --set path into a tree', () => {
   const tree = {};
   setPath(tree, 'search.DIAL.power.worlds.max', 96);
-  setPath(tree, 'chess.LEAF_CLAMP', 900);
+  setPath(tree, 'chess.MAX_SF_DEPTH', 12);
   assert.deepEqual(tree, {
     search: { DIAL: { power: { worlds: { max: 96 } } } },
-    chess: { LEAF_CLAMP: 900 },
+    chess: { MAX_SF_DEPTH: 12 },
   });
 });

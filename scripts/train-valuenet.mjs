@@ -17,8 +17,9 @@
 // net is trained in that convention throughout, matching what evalBoard returns,
 // so the leaf evaluator negates once when reading it back.
 //
-// Targets are clipped to ±`clip` (default 300, the same LEAF_CLAMP the search
-// uses) so a handful of mate scores do not own the gradient.
+// Targets are clipped to ±`clip` (default 300 cp) so a handful of mate scores do
+// not own the gradient. The search reads the net's centipawns back as a value
+// through the engine's win-rate model (ObscuroAgent.js, approxUtility).
 // ---------------------------------------------------------------------------
 
 import { createReadStream, writeFileSync, existsSync } from 'node:fs';

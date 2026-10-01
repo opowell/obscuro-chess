@@ -19,8 +19,8 @@
 //     is a paired difference and the position-to-position variance (which is
 //     enormous, and which the win/loss harness pays in full) cancels.
 //   • BOUNDED. The score is centipawn loss against a deep reference search on
-//     the TRUE board, clamped by the same LEAF_CLAMP the search uses, with a
-//     hung king pinned at KING_HANG. No single position can dominate the mean.
+//     the TRUE board (mate and a hung king at ±100000), winsorised at --clip,
+//     and expected-score loss beside it. No single position can dominate.
 //   • DENSE. Every ply is a datum. One 60-ply game yields ~30 per seat, where
 //     the win/loss harness yields one bit per game.
 //
@@ -56,7 +56,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCorpus, describeCorpus } from '../src/corpus.js';
 import { FogChess } from '../src/FogChess.js';
-import { ChessObscuroAgent, makeChessLeafEval, getLeafEvalStats, resetLeafEvalStats, setGame, setLeafValue } from '../src/ObscuroAgent.js';
+import { ChessObscuroAgent, makeChessLeafEval, getLeafEvalStats, resetLeafEvalStats, setGame } from '../src/ObscuroAgent.js';
 import {
   setBeliefSampleAlphaForSeat, setMovePriorForSeat, setBeliefReachWeightingForSeat,
 } from '../src/exactBelief.js';
@@ -208,14 +208,6 @@ const ARMS = {
     a: { label: 'fitted π, α=1', alpha: 1, prior: makeMovePrior(FITTED_WEIGHTS) },
     b: { label: 'uniform π, α=1', alpha: 1, prior: UNIFORM_PRIOR },
   },
-  // The scale the search values leaves on: the engine's win/draw/loss as a
-  // bounded utility in [−1, +1], against centipawns clamped at LEAF_CLAMP with a
-  // win worth SEARCH_WIN. At the shipped α. The REFERENCE is centipawns either
-  // way (referencesFor), so both arms are scored on the same yardstick.
-  values: {
-    a: { label: 'wdl values', alpha: 1, leafValue: 'wdl' },
-    b: { label: 'cp values', alpha: 1, leafValue: 'cp' },
-  },
 };
 const arm = ARMS[armName];
 if (!arm) throw new Error(`--arm must be one of ${Object.keys(ARMS).join('|')}`);
@@ -320,7 +312,7 @@ setGame(REPLAY_GAME);
  * and a diverging game would compare two different sets of positions.
  */
 async function replayArm(sess, seat, spec, seed) {
-  const { alpha, prior, sfDepth, rounds, reach, leafEval, leafValue } = spec;
+  const { alpha, prior, sfDepth, rounds, reach, leafEval } = spec;
   // Fresh ENGINE, unconditionally — protocol note 4, and the counterpart of the
   // fresh agent and fresh players array below. Every arm of every game/seat
   // starts the engine from the same state, so a respawn can never land at a
@@ -334,7 +326,6 @@ async function replayArm(sess, seat, spec, seed) {
   setBeliefSampleAlphaForSeat(seat, alpha ?? 0);
   setMovePriorForSeat(seat, prior ?? null);
   setBeliefReachWeightingForSeat(seat, reach ?? null);
-  setLeafValue(leafValue ?? null);
   const agent = new ChessObscuroAgent({
     rng: mulberry32(seed), ...knobs,
     ...(sfDepth ? { sfDepth } : {}), ...(rounds ? { maxRounds: rounds } : {}),
@@ -376,22 +367,23 @@ async function replayArm(sess, seat, spec, seed) {
   setBeliefSampleAlphaForSeat(seat, null);
   setMovePriorForSeat(seat, null);
   setBeliefReachWeightingForSeat(seat, null);
-  setLeafValue(null);
   return { picks, searchMs };
 }
 
 /**
  * Reference scores for every legal move at one of `seat`'s turns, on the TRUE
- * board. Same evaluator the search uses at its leaves (Stockfish MultiPV, hung
- * kings pinned at −KING_HANG, clamped) but at a depth the search never affords.
+ * board. Same evaluator the search uses at its leaves (Stockfish MultiPV) but at
+ * a depth the search never affords, in centipawns by default (mate and a hung
+ * king at ±100000) or, given refEvalU, as values in [−1, +1].
  * Identical for both arms, so it is computed once per position and shared.
  */
-const refEval = makeChessLeafEval(refDepth, 0);
-async function referenceAt(state, seat) {
+const refEval = makeChessLeafEval(refDepth, 0, { scale: 'cp' });
+const refEvalU = makeChessLeafEval(refDepth, 0);
+async function referenceAt(state, seat, evaluate = refEval) {
   const legal = FogChess.getLegalActions({ ...state, activePlayers: [seat] }, seat);
   if (legal.length <= 1) return null;
   const childStates = legal.map(a => FogChess.applyActions(state, [{ playerId: seat, action: a }]));
-  const scores = await refEval(state, seat, legal, childStates);
+  const scores = await evaluate(state, seat, legal, childStates);
   if (!scores) return null;
   const byKey = new Map();
   let best = -Infinity;
@@ -420,16 +412,13 @@ async function referencesFor(sess, seat) {
     if (!pa?.action) break;
     if (pa.playerId === seat) {
       const tr = Date.now();
-      setLeafValue('cp');
       const r = await referenceAt(state, seat);
-      setLeafValue('wdl');
-      if (r) r.u = await referenceAt(state, seat);
+      if (r) r.u = await referenceAt(state, seat, refEvalU);
       if (VERBOSE) process.stdout.write(`      ply ${i} REFERENCE ${Date.now() - tr} ms (${r?.n ?? 0} moves)\n`);
       if (r) refs.set(i, r);
     }
     state = FogChess.applyActions(state, [pa]);
   }
-  setLeafValue(null);
   return refs;
 }
 

@@ -9,7 +9,7 @@
 //      parameter, load a whole named configuration, or reshape the difficulty
 //      dial without growing its own vocabulary:
 //
-//        obscuro-chess demo --difficulty 60 --set chess.LEAF_CLAMP=900
+//        obscuro-chess demo --difficulty 60 --set chess.MAX_SF_DEPTH=12
 //        node scripts/move-quality.mjs --settings sweep.json --arm reach
 //        node scripts/move-quality.mjs --preset paper-design --games 40
 //
@@ -51,7 +51,7 @@ export function makeNumberReader(argv) {
 
 // `--set path=value`. The value is parsed as JSON when it is valid JSON and
 // left as a plain string otherwise, so all of these do the obvious thing:
-//   chess.LEAF_CLAMP=900                       → 900
+//   chess.MAX_SF_DEPTH=12                      → 12
 //   search.SEARCH_DEFAULTS.identityDiagnostic=false → false
 //   search.DIAL.power.worlds={"min":1,"max":96}     → an object
 //   chess.SF_CACHE_DIR=/tmp/sf                 → "/tmp/sf"
@@ -95,7 +95,7 @@ export function applyCliSettings(argv = process.argv.slice(2)) {
       settingsFile = a.slice('--settings='.length);
     } else if (a === '--set' || a.startsWith('--set=')) {
       const pair = a === '--set' ? argv[++i] : a.slice('--set='.length);
-      if (pair == null) throw new Error('--set needs path=value, e.g. --set chess.LEAF_CLAMP=900');
+      if (pair == null) throw new Error('--set needs path=value, e.g. --set chess.MAX_SF_DEPTH=12');
       const eq = pair.indexOf('=');
       if (eq < 0) throw new Error(`--set needs path=value, got ${JSON.stringify(pair)}`);
       setPath(overrides, pair.slice(0, eq), parseSetValue(pair.slice(eq + 1)));
@@ -110,7 +110,7 @@ export function applyCliSettings(argv = process.argv.slice(2)) {
   }
 
   // Order matters: the preset is the lowest of the three, then the file, then
-  // --set — so `--preset paper --set chess.SEARCH_WIN=8000` is "the paper's setup
+  // --set — so `--preset paper --set chess.MAX_SF_DEPTH=4` is "the paper's setup
   // except for this one knob", which is the shape a sweep over a preset takes.
   // The preset and the file share ONE settings layer (loadSettings), so the
   // merge happens here rather than by stacking two layers.
@@ -152,7 +152,7 @@ Settings flags (understood by every command):
   --list-presets        print the shipped presets, with their aliases
   --settings <file>     load a JSON settings file (see docs/SETTINGS.md)
   --set <path>=<value>  override one parameter; repeatable
-                        e.g. --set chess.LEAF_CLAMP=900
+                        e.g. --set chess.MAX_SF_DEPTH=12
                              --set search.DIAL.power.worlds=32          (fix it)
                              --set search.DIAL.power.worlds.max=96      (reshape the dial)
   --print-config        print every parameter, its value and where it came from

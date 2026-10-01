@@ -8,7 +8,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { FogChess } from '../src/FogChess.js';
 import { getAllFogMoves } from '../src/moves.js';
-import { makeChessLeafEval, LEAF_CLAMP } from '../src/ObscuroAgent.js';
+import { makeChessLeafEval } from '../src/ObscuroAgent.js';
 import { toFEN } from '../src/fen.js';
 import { available, multiPV, quit } from '../src/stockfish.js';
 
@@ -76,6 +76,6 @@ test('a push the world blocks is priced by the engine, as the pass it is', async
   const scores = await makeChessLeafEval(depth, actions.length)(state, 'white', actions, children);
   const child = children[i];
   const [line] = await multiPV(toFEN(child.board, child.gameSpecific, 'b', child.turnNumber), { multipv: 1, depth });
-  assert.equal(scores[i], Math.max(-LEAF_CLAMP, Math.min(LEAF_CLAMP, -line.cp)));
+  assert.equal(scores[i], -(line.wdl[0] - line.wdl[2]) / 1000, "the child's own win/draw/loss, from white's side");
   assert.ok(scores[i] < Math.max(...scores), 'wasting the turn scored as the best move');
 });

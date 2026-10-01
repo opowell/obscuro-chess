@@ -1381,7 +1381,7 @@ export class ExactBelief {
    * `w` is the position's posterior weight, and an enumerating caller MUST use it
    * — an unweighted mean over enumerated worlds is an average over the wrong
    * measure. (Sampled worlds are the opposite case: the weight is already in the
-   * draw.) See ObscuroAgent.cpSumsOverWorlds.
+   * draw.) See ObscuroAgent.scoreSumsOverWorlds.
    */
   positionsAt(indices) {
     if (!this.size) return null;

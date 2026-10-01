@@ -16,7 +16,7 @@ import { param, resetSettings, validate, settingsTree, setOverrides } from '../s
 import { PRESETS, preset, presetNames, loadPreset, formatPresets } from '../src/presets.js';
 import { applyCliSettings } from '../src/cli.js';
 import { FogChess } from '../src/FogChess.js';
-import { ChessObscuroAgent, SEARCH_WIN, LEAF_CLAMP, MAX_SF_DEPTH } from '../src/ObscuroAgent.js';
+import { ChessObscuroAgent, MAX_SF_DEPTH } from '../src/ObscuroAgent.js';
 import { getDefaultMovePrior, getBeliefSampleAlpha, setBeliefSampleAlpha } from '../src/exactBelief.js';
 import {
   UNIFORM_PRIOR, UNIFORM_ONLY, FITTED_WEIGHTS, weightsForRating,
@@ -81,9 +81,6 @@ test('aliases resolve, and an unknown name names the known ones', () => {
 test('the paper preset reaches the parameters it claims to set', () => {
   loadPreset('paper');
 
-  // Bounded utilities: a win is worth the eval clamp (u: Z → [−1,+1]).
-  assert.equal(param('chess.SEARCH_WIN', SEARCH_WIN), 1500);
-  assert.equal(param('chess.SEARCH_WIN', SEARCH_WIN), param('chess.LEAF_CLAMP', LEAF_CLAMP));
   // Depth-1 leaf evaluation (App. C.5), in both dial modes.
   assert.equal(param('chess.CHESS_DIAL', {}).leafEval.sfDepth, 1);
   assert.equal(param('chess.MAX_SF_DEPTH', MAX_SF_DEPTH), 1);
@@ -158,12 +155,12 @@ test('--preset is the bottom layer: a file and --set both beat it', () => {
   const dir = mkdtempSync(join(tmpdir(), 'obscuro-preset-'));
   try {
     const file = join(dir, 'sweep.json');
-    writeFileSync(file, JSON.stringify({ chess: { SEARCH_WIN: 4000 } }));
+    writeFileSync(file, JSON.stringify({ chess: { EXACT_BELIEF_TIME_GUARD_MS: 30000 } }));
 
     applyCliSettings(['--preset', 'paper', '--settings', file,
       '--set', 'chess.EXACT_BELIEF_CAP=500000']);
 
-    assert.equal(param('chess.SEARCH_WIN', SEARCH_WIN), 4000, 'the file beats the preset');
+    assert.equal(param('chess.EXACT_BELIEF_TIME_GUARD_MS', 0), 30000, 'the file beats the preset');
     assert.equal(param('chess.EXACT_BELIEF_CAP', 0), 500000, '--set beats both');
     // Everything the two upper layers did not mention still comes from the preset.
     assert.equal(param('chess.MAX_SF_DEPTH', MAX_SF_DEPTH), 1);

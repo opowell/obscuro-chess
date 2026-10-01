@@ -40,22 +40,16 @@ test('analyzeObscuro: perfect info ranks the free-queen capture first', async ()
   // FogChess.beliefPopulation) walked by the one progressive analysis path, so
   // the solve mode is the CFR tree's perfect-information collapse, 'minimax'.
   // Its 100%/0% support carries no ranking information at a population of 1, so
-  // ranking falls to the real, calibrated Stockfish cp — the same numbers the
-  // old dedicated perfect-information branch showed.
+  // ranking falls to the engine's own evaluation, as an expected score.
   const { state, legal } = freeQueenState();
   const r = await analyzeObscuro(state, legal, { rng: () => 0, maxSfDepth: 8 });
   assert.equal(r.engine, 'obscuro');
   assert.equal(r.mode, 'minimax');
   assert.ok(r.candidates.length > 0);
   assert.equal(r.candidates[0].move.to, 'a8', 'best-ranked move should capture the queen');
-  // Threshold 300, not 500: modern Stockfish normalises cp toward WIN
-  // PROBABILITY rather than material, so the numbers are not centipawns in the
-  // "queen = 900" sense. Measured on this exact position under the vendored
-  // SF18: Rxa8 scores ~470, and up-a-whole-queen scores ~890 (SF11 rated the
-  // same capture above 500, which is what this assertion used to encode). What
-  // the test is actually for is that a free queen reads as a large swing and not
-  // a rounding error, so assert that and stay off the engine's calibration.
-  assert.ok(r.candidates[0].cp > 300, 'capturing a free queen should score as a large material swing');
+  // A free queen is close to a certain win: an expected score well above even
+  // (500 per mille), and not a rounding error.
+  assert.ok(r.candidates[0].score > 800, 'capturing a free queen should score as a near-certain win');
 });
 
 test('analyzeObscuro: perfect info climbs the depth ladder, reporting top moves at each rung', async () => {
@@ -246,7 +240,7 @@ test('analyzeObscuroProgressive: resuming continues the walk instead of restarti
 
   const baseOpts = {
     color: 'white', rng: () => 0.5,
-    cpEval: () => null,  // no Stockfish — keeps this deterministic and fast
+    scoreEval: () => null,  // no Stockfish — keeps this deterministic and fast
     maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 4, maxSfDepth: 1,
   };
 
@@ -280,7 +274,7 @@ test('analyzeObscuroProgressive: resuming continues the walk instead of restarti
 test('analyzeObscuroProgressive: a resume snapshot from a different position is ignored', async () => {
   const { view, legal, pop } = widenedFogView();
   const baseOpts = {
-    color: 'white', rng: () => 0.5, cpEval: () => null,
+    color: 'white', rng: () => 0.5, scoreEval: () => null,
     maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 4, maxSfDepth: 1,
   };
 
@@ -314,7 +308,7 @@ test('analyzeObscuroProgressive: a resume snapshot from a different position is 
 test('analyzeObscuroProgressive: pausing after every batch still covers the population exactly once', async () => {
   const { view, legal, pop } = widenedFogView();
   const baseOpts = {
-    color: 'white', rng: () => 0.5, cpEval: () => null,
+    color: 'white', rng: () => 0.5, scoreEval: () => null,
     maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 4, maxSfDepth: 1,
   };
 
@@ -352,7 +346,7 @@ test('analyzeObscuroProgressive: resuming an already-exhausted walk still return
   const legal = FogChess.getLegalActions(state, 'white');
 
   const opts = {
-    color: 'white', rng: () => 0.5, isCancelled: () => false, cpEval: () => null,
+    color: 'white', rng: () => 0.5, isCancelled: () => false, scoreEval: () => null,
     maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 8, maxSfDepth: 1,
   };
   let saved = null;
@@ -393,7 +387,7 @@ test('obscuroStrategy: isCancelled cuts the CFR round loop short', async () => {
 // on d7. With the search's generic ±10⁶ terminal the Resolve gadget chased
 // those worlds and gave Bf3–c6 (which hangs the bishop to b×c6 / K×c6 in every
 // world) ~40% of the strategy, purified to 100%. With the agent's bounded
-// SEARCH_WIN it is never played.
+// win value (+1, the same scale as every evaluation) it is never played.
 test('obscuroStrategy: a king that may be capturable does not buy a bishop sacrifice', async () => {
   // White's belief is kept the way a host keeps a human seat's: advanced at
   // each turn start, told white's own move, and shown what that move revealed.
@@ -506,17 +500,18 @@ test('analyzeObscuro under fog: emits belief worlds with per-move cp per world',
   // channel is exercised without waiting on a real search. It also asserts the
   // weighting contract — enumerated worlds must arrive carrying their posterior
   // probability, heaviest first — and reports a mass-weighted sum, the shape
-  // cpSumsOverWorlds now returns.
+  // scoreSumsOverWorlds returns.
   const frames = [];
   const seenWeights = [];
   const r = await analyzeObscuro(view, legal, {
     color: 'white', rng: () => 0.5, isCancelled: () => false,
     maxRounds: 4, expandPerRound: 2, cfrPerRound: 1, batchSize: 8, maxSfDepth: 1,
-    cpEval: (worlds, actions, depth, onWorld) => {
-      worlds.forEach((w, i) => onWorld?.(i, w, actions.map((_, j) => 10 * j)));
+    scoreEval: (worlds, actions, depth, onWorld) => {
+      const value = j => j / actions.length; // a value in [0, 1) per move
+      worlds.forEach((w, i) => onWorld?.(i, w, actions.map((_, j) => value(j))));
       let wsum = 0;
       for (const w of worlds) { seenWeights.push(w.beliefWeight); wsum += w.beliefWeight; }
-      return { sums: actions.map((_, j) => 10 * j * wsum), wsum, n: worlds.length };
+      return { sums: actions.map((_, j) => value(j) * wsum), wsum, n: worlds.length };
     },
     onProgress: (info) => frames.push(info),
   });
@@ -528,11 +523,11 @@ test('analyzeObscuro under fog: emits belief worlds with per-move cp per world',
   const bw = r.beliefWorlds;
   assert.ok(bw, 'the final result carries the belief population');
   assert.equal(bw.exact, true);
-  assert.deepEqual(bw.moves, legal.map(FogChess.actionKey), 'cp columns are keyed to the legal moves');
+  assert.deepEqual(bw.moves, legal.map(FogChess.actionKey), 'score columns are keyed to the legal moves');
   assert.ok(bw.worlds.length >= 1, 'at least one world to show');
   for (const w of bw.worlds) {
     assert.ok(Array.isArray(w.hidden) && w.hidden.length > 0, 'each world says what the fog is hiding');
-    assert.equal(w.cp.length, legal.length, 'one cp per legal move, aligned with `moves`');
+    assert.equal(w.score.length, legal.length, 'one score per legal move, aligned with `moves`');
   }
   // Candidates carry the same key, so a panel can line a row up with its column.
   assert.ok(r.candidates.every(c => bw.moves.includes(c.key)), 'every candidate row is addressable');
@@ -542,7 +537,7 @@ test('analyzeObscuro under fog: emits belief worlds with per-move cp per world',
   const opener = frames[0];
   assert.equal(opener.kind, 'belief', 'the first frame is the engine-free board list');
   assert.ok(opener.beliefWorlds.worlds.length >= 1);
-  assert.equal(opener.beliefWorlds.worlds[0].cp, null, 'nothing is scored yet at that point');
+  assert.equal(opener.beliefWorlds.worlds[0].score, null, 'nothing is scored yet at that point');
   stockfishQuit();
 });
 

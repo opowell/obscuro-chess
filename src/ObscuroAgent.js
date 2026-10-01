@@ -72,8 +72,6 @@ export const CHESS_DIAL = {
 const chessDial = () => param('chess.CHESS_DIAL', CHESS_DIAL);
 const analysisDefaults = () => param('chess.ANALYSIS_DEFAULTS', ANALYSIS_DEFAULTS);
 const maxSfDepth = () => param('chess.MAX_SF_DEPTH', MAX_SF_DEPTH);
-const searchWin = () => param('chess.SEARCH_WIN', SEARCH_WIN);
-const leafClamp = () => param('chess.LEAF_CLAMP', LEAF_CLAMP);
 
 // obscuroStrategy / analyzeObscuroProgressive defaults — the analysis-panel and
 // test-harness search sizes, distinct from ChessObscuroAgent's own move-time
@@ -89,71 +87,51 @@ export const ANALYSIS_DEFAULTS = {
   batchSize: 16,                // worlds enumerated/sampled per batch
   sweepBatches: 4,               // generative fallback: batches per ladder rung
   likelyWorldsCap: 32,           // "most likely boards" overlay size
-  scoredWorldsCap: 96,           // per-world cp view cap
+  scoredWorldsCap: 96,           // per-world score view cap
   // _captureStockfishAnalysis: the MultiPV ranking shown beside a time-mode
   // perfect-information move. Display only — it never changes what is played.
   captureMultipv: 8,
   captureDepth: 12,
 };
 
-// Material (Stockfish cp) scores are clamped so an imagined king capture from
-// phantom hidden pieces can't swamp a concrete material decision.
-export const LEAF_CLAMP = 1500;
-const clip = v => { const c = leafClamp(); return v > c ? c : v < -c ? -c : v; };
-
-// The search's terminal win/loss magnitude, on the same cp scale as the leaves.
-// The paper bounds ALL utilities (u: Z → [−1,+1], evals clamped inside it):
-// under fog, values are averaged across belief worlds, so a real game-ending
-// outcome must outweigh material decisively but boundedly — with the generic
-// default (±10⁶) a single phantom world in which the enemy king looked
-// capturable would swamp every real consideration and send the AI lunging.
-// 8000 ≈ 5.3× the material clamp: game-deciding, not belief-noise-proof.
-export const SEARCH_WIN = 8000;
-
-// Leaving your OWN king capturable is not merely "down some material" — it IS
-// the terminal loss (−SEARCH_WIN), and it is a consequence of a move the mover
-// CHOSE. Otherwise, under fog, a move that hangs the king in half the belief
-// worlds gets averaged against ordinary material evals in the other half and
-// comes out looking playable — which is exactly how the AI walked its king onto
-// a square a hidden pawn was covering. This is deliberately asymmetric with the
-// +LEAF_CLAMP cap on *capturing the enemy* king at a LEAF: an imagined capture
-// is phantom-prone and must not be banked on, while exposing our own king is a
-// real, self-inflicted loss we must avoid.
-const kingHang = () => winValue();
-
-// LEAF VALUES — what a position is worth, to the side to move or the side that
-// just moved, on one of two scales:
+// LEAF VALUES. The search values a position by the engine's own expected
+// result: (wins − losses) / 1000 from its win/draw/loss estimate (UCI_ShowWDL),
+// to the side whose value it is. Every value is in [−1, +1], a captured king is
+// +1 (WIN) and a hung one −1. These are the paper's bounded utilities
+// (u: Z → [−1, +1]), and nothing in them is hand-picked: the engine's
+// evaluation already IS a chance of winning, so there is no clamp, and no
+// constant deciding what a win is worth against an evaluation.
 //
-//   'wdl' — the engine's own expected result: (wins − losses) / 1000 from its
-//           win/draw/loss estimate (UCI_ShowWDL), so every value is in [−1, +1],
-//           a captured king is +1 and a hung one −1. These are the paper's
-//           bounded utilities (u: Z → [−1, +1]) with nothing hand-picked: the
-//           engine's evaluation already IS a chance of winning, so no clamp and
-//           no constant deciding what a win is worth against an evaluation.
-//   'cp'  — centipawns clamped to ±LEAF_CLAMP, with a win worth SEARCH_WIN.
-//           The hand-picked scale this engine used until 2026-10.
-export const LEAF_VALUE = 'cp';
-// A process-wide override of the setting, for a harness that runs both scales
-// in one process (move-quality.mjs's `values` arm); null defers to the setting.
-let leafValueOverride = null;
-export function setLeafValue(mode) { leafValueOverride = mode ?? null; }
-const wdlValues = () => (leafValueOverride ?? param('chess.LEAF_VALUE', LEAF_VALUE)) === 'wdl';
-
-// The terminal win: +1 on the bounded scale, SEARCH_WIN on the centipawn one.
-function winValue() { return wdlValues() ? 1 : searchWin(); }
+// This replaced (2026-10-01) centipawns clamped at ±1500 with a win worth 8000,
+// both picked by hand. Measured with move-quality.mjs over 30 games: level on
+// expected score lost per move (−0.11 ± 0.37 points of %), worse by 13 ± 2 on
+// centipawns lost, which it gives up where the result is not in doubt.
+//
+// Leaving your OWN king capturable is the loss (−WIN), not "down some
+// material": under fog, a move that hangs the king in half the belief worlds
+// would otherwise be averaged against ordinary evaluations in the other half
+// and come out looking playable — which is exactly how the AI once walked its
+// king onto a square a hidden pawn was covering.
+//
+// A measurement harness can ask for raw centipawns instead (`scale: 'cp'` on
+// makeChessLeafEval), for a yardstick in the units people read; mate and a
+// hung king are then ±MATE_CP, as multiPV encodes mate. The search never does.
+const WIN = 1;
+const MATE_CP = 100000;
+const winValue = (scale) => (scale === 'cp' ? MATE_CP : WIN);
 
 // An engine line's value to the side to move in the position it was asked
 // about. `board` is that position, for the rare line without a win/draw/loss.
-function lineValue({ cp, wdl }, board) {
-  if (!wdlValues()) return clip(cp);
+function lineValue({ cp, wdl }, board, scale) {
+  if (scale === 'cp') return cp;
   if (wdl) return (wdl[0] - wdl[2]) / 1000;
   return approxUtility(cp, board);
 }
 
 // A centipawn score from something other than the engine — the static
 // evaluator standing in for an unanswered child, or the distilled value net —
-// on the current scale. `board` is the position it scores.
-function cpValue(cp, board) { return wdlValues() ? approxUtility(cp, board) : clip(cp); }
+// as a value. `board` is the position it scores.
+function cpValue(cp, board, scale) { return scale === 'cp' ? cp : approxUtility(cp, board); }
 
 // Stockfish 17's published win-rate model (uci.cpp, win_rate_params), for the
 // values the engine gave no win/draw/loss for. An APPROXIMATION of the engine
@@ -260,14 +238,14 @@ function engineWouldRefuse(board, mover) {
 // capturable, and in this world (where everything is known) the mover then
 // takes it: a win for the mover, valued as one rather than guessed at by the
 // static evaluator.
-async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled }) {
+async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled, scale }) {
   const them = otherColor(mover);
   const out = new Array(actions.length);
   const need = [];
   for (let i = 0; i < actions.length; i++) {
     const board = (childStates?.[i] ?? state).board;
     const k = findKingSquare(board, mover);
-    if (!k || isAttackedBy(board, k, them)) { out[i] = -kingHang(); continue; } // hung own king → losing move
+    if (!k || isAttackedBy(board, k, them)) { out[i] = -winValue(scale); continue; } // hung own king → losing move
     need.push(i);
   }
   // Nothing left for the engine to price (every child hangs the king) — the
@@ -296,11 +274,11 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
           { multipv: 1, depth: sfDepth, isCancelled, onStopped: () => { truncated = true; } });
       } catch { pv = null; }
       if (Array.isArray(pv) && pv.length === 0) {
-        out[i] = winValue(); // no legal move for them: see NO MOVES above
+        out[i] = winValue(scale); // no legal move for them: see NO MOVES above
         priced.add(i);
         leafStats.engineLeaves++;
       } else if (pv?.length && typeof pv[0].cp === 'number') {
-        out[i] = -lineValue(pv[0], cs.board);
+        out[i] = -lineValue(pv[0], cs.board, scale);
         priced.add(i);
         leafStats.engineLeaves++;
       }
@@ -309,7 +287,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     for (const i of need) {
       if (priced.has(i)) continue;
       leafStats.fallbackLeaves++;
-      out[i] = cpValue(evaluate(childStates[i].board, mover), childStates[i].board);
+      out[i] = cpValue(evaluate(childStates[i].board, mover), childStates[i].board, scale);
     }
     leafStats.refusedNodes++;
     if (truncated) leafStats.truncated++;
@@ -347,7 +325,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
       engineOk = !truncated;
       for (const line of pv) {
         const a = uciToAction(line.move, actions);
-        if (a) { const i = actions.indexOf(a); if (i >= 0) valueByIdx.set(i, lineValue(line, state.board)); }
+        if (a) { const i = actions.indexOf(a); if (i >= 0) valueByIdx.set(i, lineValue(line, state.board, scale)); }
       }
     }
     if (pv && pv.length && valueByIdx.size < need.length) leafStats.unmappedNodes++;
@@ -372,8 +350,8 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
             { multipv: 1, depth: sfDepth, isCancelled, onStopped: () => { truncated = true; } });
         } catch { childPv = null; }
         if (truncated) break;
-        if (Array.isArray(childPv) && childPv.length === 0) valueByIdx.set(i, winValue()); // NO MOVES
-        else if (childPv?.length && typeof childPv[0].cp === 'number') valueByIdx.set(i, -lineValue(childPv[0], cs.board));
+        if (Array.isArray(childPv) && childPv.length === 0) valueByIdx.set(i, winValue(scale)); // NO MOVES
+        else if (childPv?.length && typeof childPv[0].cp === 'number') valueByIdx.set(i, -lineValue(childPv[0], cs.board, scale));
       }
       if (truncated) engineOk = false;
     }
@@ -389,7 +367,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     for (const i of need) {
       const fromEngine = valueByIdx.has(i);
       if (fromEngine) leafStats.engineLeaves++; else leafStats.fallbackLeaves++;
-      out[i] = fromEngine ? valueByIdx.get(i) : cpValue(evaluate(childStates[i].board, mover), childStates[i].board);
+      out[i] = fromEngine ? valueByIdx.get(i) : cpValue(evaluate(childStates[i].board, mover), childStates[i].board, scale);
     }
     leafStats.calls++;
     if (truncated) leafStats.truncated++;
@@ -401,9 +379,12 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
 // Stockfish deepens internally on the way (`go depth N` sweeps 1..N), so a
 // single call already IS the ladder when the target depth is known up front —
 // which is the power-mode case, where the dial fixes depth and breadth.
-export function makeChessLeafEval(sfDepth, cols, { isCancelled } = {}) {
+//
+// `scale: 'cp'` returns raw centipawns instead of values (see LEAF VALUES), for
+// a measurement yardstick; the search never passes it.
+export function makeChessLeafEval(sfDepth, cols, { isCancelled, scale } = {}) {
   return async (state, mover, actions, childStates) =>
-    (await scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled })).scores;
+    (await scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled, scale })).scores;
 }
 
 // THE DISTILLED EVALUATOR — same contract, no engine. `net` is a ValueNet
@@ -434,7 +415,7 @@ export function makeNetLeafEval(net) {
     for (let i = 0; i < actions.length; i++) {
       const board = (childStates?.[i] ?? state).board;
       const k = findKingSquare(board, mover);
-      if (!k || isAttackedBy(board, k, them)) { out[i] = -kingHang(); continue; }
+      if (!k || isAttackedBy(board, k, them)) { out[i] = -WIN; continue; }
       out[i] = -cpValue(net.evalBoard(board, themChar), board);
     }
     return out;
@@ -531,7 +512,7 @@ export class ChessObscuroAgent extends GenericObscuroAgent {
     try { return super._config(observation); } finally { this.opts = saved; }
   }
 
-  // Bounded terminal value for the fog search (see SEARCH_WIN above).
+  // The terminal win, on the same bounded scale as every leaf (see LEAF VALUES).
   _winValue() { return winValue(); }
 
   // Chess's batched Stockfish node heuristic, its depth/width scaled by the dial.
@@ -694,11 +675,9 @@ export class ChessObscuroAgent extends GenericObscuroAgent {
       const pv = await multiPV(fen, { multipv, depth });
       if (!pv || !pv.length) return null;
 
-      // A line's chance of winning, in (0,1), from the mover's perspective. On
-      // the bounded scale it is the engine's own expected score (a draw counts
-      // half); on the centipawn one, the Elo logistic. Mate scores saturate.
-      const winProb = ({ cp, wdl }) => (wdlValues() && wdl ? (wdl[0] + wdl[1] / 2) / 1000
-        : cp >= 90000 ? 1 : cp <= -90000 ? 0 : 1 / (1 + Math.pow(10, -cp / 400)));
+      // A line's expected score, in [0,1], from the mover's perspective: the
+      // engine's own chance of winning plus half its chance of drawing.
+      const winProb = (line) => (1 + lineValue(line, state.board)) / 2;
       // β: 0 → uniform, betaAtHalf at t=0.5 → probability ∝ win-prob, betaMax at t=1 → near-best.
       const beta = t <= 0.5 ? (t / 0.5) * betaAtHalf : (betaAtHalf + (t - 0.5) / 0.5 * (betaMax - betaAtHalf));
 
@@ -817,7 +796,7 @@ export async function obscuroStrategy(state, legalActions, opts = {}) {
 
   // The same bounded terminal the agent searches with (_winValue). FogChess
   // declares no winValue, so without it the search falls back to the generic
-  // ±10⁶ — exactly the unbounded win SEARCH_WIN exists to prevent: the Resolve
+  // ±10⁶ — an unbounded win, against leaves in [−1, +1]: the Resolve
   // gadget then chases whichever belief world leaves the enemy king capturable,
   // and the analysis ranked a bishop sacrifice first (97%) in a position where
   // the agent itself would never play it.
@@ -850,14 +829,14 @@ export async function obscuroStrategy(state, legalActions, opts = {}) {
 // Shared with the onRound progress callback above so a mid-search snapshot and
 // the final result are ranked identically. Sorted by probability (how much of
 // the equilibrium's mass this move gets) descending, ties — most of them,
-// since only a handful of moves ever get nonzero mass — broken by cp
+// since only a handful of moves ever get nonzero mass — broken by score
 // (highest first) once one's available (see analyzeObscuroProgressive's eval
-// ladder below; mid-search progress ticks have no cp yet, so ties there just
+// ladder below; mid-search progress ticks have no score yet, so ties there just
 // keep whatever order `rows` came in).
 function rankCandidates(rows, dist) {
   return (rows ?? [])
     .map((action, i) => ({ move: action, prob: dist?.[i] ?? 0 }))
-    .sort((a, b) => (b.prob - a.prob) || ((b.cp ?? -Infinity) - (a.cp ?? -Infinity)));
+    .sort((a, b) => (b.prob - a.prob) || ((b.score ?? -Infinity) - (a.score ?? -Infinity)));
 }
 
 // ---------------------------------------------------------------------------
@@ -881,16 +860,22 @@ export async function analyzeObscuro(state, legalActions, opts = {}) {
   return await analyzeObscuroProgressive(state, legalActions, opts);
 }
 
+// What the analysis reports for a move: its expected score in per mille (0 a
+// certain loss, 500 even, 1000 a certain win), from a mean value u in [−1, +1].
+// An integer, so it crosses the wire as one, and the mean of values (unlike a
+// mean of centipawns, where one mate is ±100000) needs no clamp to be sane.
+const toScore = (u) => Math.round(500 * (1 + u));
+
 // Batched Stockfish leaf eval over an EXPLICIT set of belief worlds, all scored
-// at the SAME depth (`opts.sfDepth`) so their scores are commensurable: returns
-// the per-legal-move MASS-WEIGHTED SUM of cp across the worlds it managed to
-// score (Σ w·cp), the total mass `wsum` of those worlds, and their count `n`.
+// at the SAME depth (`opts.sfDepth`) so their values are commensurable: returns
+// the per-legal-move MASS-WEIGHTED SUM of values across the worlds it managed to
+// score (Σ w·u), the total mass `wsum` of those worlds, and their count `n`.
 //
 // The weighting is the point. Belief worlds are NOT equally likely — each carries
 // its posterior probability as `beliefWeight` (see FogChess.enumerateWorlds) —
 // so a plain mean would be an average over the wrong measure, giving a world the
 // opponent almost certainly did not play into the same say as one they probably
-// did. Σ(w·cp)/Σw is the population expectation: exact once the walk is
+// did. Σ(w·u)/Σw is the population expectation: exact once the walk is
 // exhaustive, and an unbiased running estimate while it is partial. Worlds with
 // no weight (the generative fallback, which samples uniformly, and sampled worlds
 // generally, whose weight is already in the draw) default to 1 and reduce this to
@@ -903,7 +888,7 @@ export async function analyzeObscuro(state, legalActions, opts = {}) {
 // a mass one. Bails promptly when the caller has moved on or the budget is spent,
 // discarding any world whose evaluation was interrupted part-way rather than
 // folding a half-searched score into the mean.
-export async function cpSumsOverWorlds(game, worlds, color, legalActions, cols, opts = {}) {
+export async function scoreSumsOverWorlds(game, worlds, color, legalActions, cols, opts = {}) {
   const { sfDepth = maxSfDepth(), isCancelled, deadline, onWorld } = opts;
   const stop = () => (isCancelled?.() ?? false) || (deadline != null && Date.now() > deadline);
   const leafEval = makeChessLeafEval(sfDepth, cols, { isCancelled: stop });
@@ -977,7 +962,7 @@ function shuffledIndices(n, rng) {
 // is only meaningful over worlds scored at the same depth: mixing a depth-20
 // world with a depth-3 world would weight the position by how far down the
 // batch queue it happened to land. So each rung is a complete sweep, and its
-// cp aggregates are discarded and rebuilt from scratch at the next rung.
+// score aggregates are discarded and rebuilt from scratch at the next rung.
 //
 // The MIXING probabilities are not re-derived per rung: they come from the CFR
 // tree, which prices its own leaves with the game's cheap static evaluator and
@@ -998,9 +983,9 @@ function shuffledIndices(n, rng) {
 //     `total` is null, and a sweep is capped at a fixed batch count so the
 //     ladder can still climb.
 //
-// Aggregation (see docs/STRENGTH-PLAN.md's analysis-panel section): the cp EVAL per
-// move is additive over worlds, so a MASS-weighted running mean — Σ(w·cp)/Σw over
-// each world's posterior probability, see cpSumsOverWorlds — converges to the
+// Aggregation (see docs/STRENGTH-PLAN.md's analysis-panel section): the EVAL (value) per
+// move is additive over worlds, so a MASS-weighted running mean — Σ(w·u)/Σw over
+// each world's posterior probability, see scoreSumsOverWorlds — converges to the
 // exact population expectation. The move PROBABILITY is an ensemble average of
 // each batch's own CFR equilibrium (weighted by batch mass) — a
 // well-defined blend, but NOT the single joint-equilibrium mixing (that would
@@ -1034,18 +1019,18 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   // unbounded population before the ladder moves up a rung.
   const sweepBatches = opts.sweepBatches ?? analysisDefaults().sweepBatches;
 
-  // cp source: run Stockfish over each batch, wherever it's available — server
+  // Eval source: run Stockfish over each batch, wherever it's available — server
   // (Node worker thread) or browser (nested Worker over the vendored WASM
-  // build; see stockfish.js). `opts.cpEval` is an optional override some
+  // build; see stockfish.js). `opts.scoreEval` is an optional override some
   // caller can still supply instead. When neither is available, candidates
-  // stay prob-only (cp: null) and the depth ladder is meaningless, so the walk
+  // stay prob-only (score: null) and the depth ladder is meaningless, so the walk
   // does a single sweep.
-  const cpEval = opts.cpEval
+  const scoreEval = opts.scoreEval
     // `onWorld` is forwarded so an override can feed the per-world view too (the
     // real evaluator below reports every world it prices through it).
-    ? ((worlds, sfDepth, onWorld) => opts.cpEval(worlds, legalActions, sfDepth, onWorld))
+    ? ((worlds, sfDepth, onWorld) => opts.scoreEval(worlds, legalActions, sfDepth, onWorld))
     : ((await stockfishAvailable())
-        ? ((worlds, sfDepth, onWorld) => cpSumsOverWorlds(game, worlds, me, legalActions, cols, { sfDepth, isCancelled, deadline, onWorld }))
+        ? ((worlds, sfDepth, onWorld) => scoreSumsOverWorlds(game, worlds, me, legalActions, cols, { sfDepth, isCancelled, deadline, onWorld }))
         : null);
 
   const pop = game.beliefPopulation(state, me);
@@ -1111,15 +1096,15 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
       likelyWorlds.push({ index: idx[i], prob: ranked.top[i].prob, hidden: hiddenOf(worlds[i]) });
     }
   }
-  // index → { index, prob, hidden, cp[] }, for the worlds the engine actually
-  // priced at the current rung. Rebuilt per rung like the cp aggregates, so
-  // every cp in it was searched to the same depth and the "best world for this
+  // index → { index, prob, hidden, score[] }, for the worlds the engine actually
+  // priced at the current rung. Rebuilt per rung like the score aggregates, so
+  // every score in it was searched to the same depth and the "best world for this
   // move" ordering compares like with like.
   // Every one of these is seeded from the resume snapshot when there is one, and
   // COPIED out of it rather than aliased: the snapshot the caller holds must stay
   // the state as of a completed batch, and these keep mutating as the walk runs
   // on (a batch cancelled half-way through still writes into them before it
-  // breaks — see the cp fold below).
+  // breaks — see the score fold below).
   let scoredWorlds = rs ? new Map(rs.scoredWorlds) : new Map();
   let settledWorlds = rs ? new Map(rs.settledWorlds) : new Map();
 
@@ -1127,13 +1112,13 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   // each weighted by the batch's posterior MASS rather than its world count, so a
   // batch of near-impossible worlds doesn't get an equal vote in the ensemble.
   const probSum = rs ? new Map(rs.probSum) : new Map(); let probW = rs?.probW ?? 0;
-  // Eval aggregate — rebuilt from scratch at each rung of the ladder. `cpMass` is
-  // the denominator of the weighted mean (Σ w, not a world count). `settledCp`
+  // Eval aggregate — rebuilt from scratch at each rung of the ladder. `valueMass` is
+  // the denominator of the weighted mean (Σ w, not a world count). `settledScore`
   // holds the deepest rung that actually produced numbers, so the eval column
   // never blanks out while a deeper rung is still being computed (or is being
   // abandoned because the engine can't reach it inside the budget).
-  let cpSum = rs ? new Map(rs.cpSum) : new Map(), cpMass = rs ? new Map(rs.cpMass) : new Map();
-  const settledCp = rs ? new Map(rs.settledCp) : new Map();
+  let valueSum = rs ? new Map(rs.valueSum) : new Map(), valueMass = rs ? new Map(rs.valueMass) : new Map();
+  const settledScore = rs ? new Map(rs.settledScore) : new Map();
   let settledDepth = rs?.settledDepth ?? 0;
 
   // Nothing hidden (population of exactly one world) makes the mixing degenerate
@@ -1141,40 +1126,40 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   // the probability column carries no ranking information at all. Rank by the
   // engine's evaluation there, which is what the old perfect-information branch
   // showed. Under a real belief cloud the mixing IS the answer to "what should I
-  // play", so it stays primary and cp only breaks its (very common) ties.
-  const rankByCp = pop.exact && pop.total === 1;
+  // play", so it stays primary and score only breaks its (very common) ties.
+  const rankByScore = pop.exact && pop.total === 1;
   const buildCandidates = () => legalActions
     .map(a => {
       const key = k(a);
-      const mass = cpMass.get(key);
+      const mass = valueMass.get(key);
       return {
         move: a,
-        // Same identity the per-world cp vectors are indexed by (`moves` in the
+        // Same identity the per-world score vectors are indexed by (`moves` in the
         // belief payload below), so the panel can line a candidate row up with
         // its column without re-deriving move equality from the action object.
         key,
         prob: probW ? (probSum.get(key) ?? 0) / probW : 0,
-        cp: mass ? Math.round(cpSum.get(key) / mass) : (settledCp.get(key) ?? null),
+        score: mass ? toScore(valueSum.get(key) / mass) : (settledScore.get(key) ?? null),
       };
     })
-    .sort(rankByCp
-      ? (a, b) => ((b.cp ?? -Infinity) - (a.cp ?? -Infinity)) || (b.prob - a.prob)
-      : (a, b) => (b.prob - a.prob) || ((b.cp ?? -Infinity) - (a.cp ?? -Infinity)));
+    .sort(rankByScore
+      ? (a, b) => ((b.score ?? -Infinity) - (a.score ?? -Infinity)) || (b.prob - a.prob)
+      : (a, b) => (b.prob - a.prob) || ((b.score ?? -Infinity) - (a.score ?? -Infinity)));
 
   // The population itself, for the panel's world stepper — the union of the most
   // LIKELY boards (engine-free, so they are on screen immediately) and the
-  // boards the engine has actually priced at the current rung (which carry a cp
+  // boards the engine has actually priced at the current rung (which carry a score
   // per candidate move, so "which board makes THIS move look best" is
-  // answerable). `moves` fixes the column order of every cp vector.
+  // answerable). `moves` fixes the column order of every score vector.
   const buildBeliefWorlds = () => {
     if (!perWorldView) return null;
     const scored = scoredWorlds.size ? scoredWorlds : settledWorlds;
     const byId = new Map();
-    for (const w of likelyWorlds) byId.set(w.index, { id: String(w.index), prob: w.prob, hidden: w.hidden, cp: null });
+    for (const w of likelyWorlds) byId.set(w.index, { id: String(w.index), prob: w.prob, hidden: w.hidden, score: null });
     for (const [id, w] of scored) {
       const prior = byId.get(id);
-      if (prior) prior.cp = w.cp;
-      else byId.set(id, { id: String(id), prob: w.prob, hidden: w.hidden, cp: w.cp });
+      if (prior) prior.score = w.score;
+      else byId.set(id, { id: String(id), prob: w.prob, hidden: w.hidden, score: w.score });
     }
     return {
       total, exact: pop.exact, depth: settledDepth || null,
@@ -1204,7 +1189,7 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
       engine: 'obscuro', mode: state.gameSpecific.fogOfWar ? 'cfr' : 'minimax',
       candidates: buildCandidates(), depth: rs.depth, maxDepth,
       batches, evaluated: rs.evaluated, total,
-      exhaustive: covered && (rs.depth >= maxDepth || !cpEval) && pop.exact,
+      exhaustive: covered && (rs.depth >= maxDepth || !scoreEval) && pop.exact,
     };
   }
 
@@ -1219,15 +1204,15 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   for (let depth = rs?.depth ?? 1; depth <= maxDepth; depth++) {
     // A fresh rung: previous depths' evals are superseded, not blended into.
     // The resumed rung is not fresh — it is the one that was interrupted, and
-    // its cp aggregates and scored worlds are the ones restored above.
+    // its score aggregates and scored worlds are the ones restored above.
     if (!resuming) {
-      cpSum = new Map(); cpMass = new Map();
+      valueSum = new Map(); valueMass = new Map();
       scoredWorlds = new Map();
     }
     let cursor = resuming ? rs.cursor : 0;
     let evaluated = resuming ? rs.evaluated : 0;
     let sweepCount = resuming ? rs.sweepCount : 0;
-    let rungCp = resuming ? rs.rungCp : 0;
+    let rungScored = resuming ? rs.rungScored : 0;
     if (!resuming) covered = false;
     resuming = false;
     // Every batch of NEW worlds contributes its equilibrium once; the exact
@@ -1278,9 +1263,9 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
         }
       }
 
-      // Eval: raw cp sums over the SAME batch at THIS rung's depth, so the
+      // Eval: raw value sums over the SAME batch at THIS rung's depth, so the
       // running mean stays exact and every world in it is equally deep.
-      if (cpEval) {
+      if (scoreEval) {
         // Keep each world's own scores as they go by, up to the cap — the
         // aggregate below sums them away, but the per-world view needs them.
         const onWorld = !perWorldView ? undefined : (w, world, scores) => {
@@ -1290,19 +1275,19 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
           scoredWorlds.set(id, {
             prob: (ranked?.probs && typeof id === 'number') ? ranked.probs[id] : null,
             hidden: hiddenOf(world),
-            cp: scores.map(s => Math.round(s)),
+            score: scores.map(toScore),
           });
         };
-        // `wsum` defaults to `n` so an `opts.cpEval` override that predates the
+        // `wsum` defaults to `n` so an `opts.scoreEval` override that predates the
         // weighting (returning just { sums, n }) still folds in, as an unweighted
         // mean over its own worlds.
-        const { sums = null, n = 0, wsum = n } = (await cpEval(worlds, depth, onWorld)) ?? {};
+        const { sums = null, n = 0, wsum = n } = (await scoreEval(worlds, depth, onWorld)) ?? {};
         if (n > 0 && sums && wsum > 0) {
-          rungCp += n;
+          rungScored += n;
           for (let i = 0; i < legalActions.length; i++) {
             const key = k(legalActions[i]);
-            cpSum.set(key, (cpSum.get(key) ?? 0) + sums[i]);
-            cpMass.set(key, (cpMass.get(key) ?? 0) + wsum);
+            valueSum.set(key, (valueSum.get(key) ?? 0) + sums[i]);
+            valueMass.set(key, (valueMass.get(key) ?? 0) + wsum);
           }
         }
       }
@@ -1311,16 +1296,16 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
       // rest of the population at a rung it cannot reach would burn one full
       // per-call timeout per world for nothing, so abandon the rung now and let
       // the ladder top out on the last one that worked.
-      if (cpEval && depth > 1 && rungCp === 0) break;
+      if (scoreEval && depth > 1 && rungScored === 0) break;
 
       batches++; evaluated += worlds.length; sweepCount++;
       covered = pop.exact ? cursor >= order.length : sweepCount >= sweepBatches;
       // Fully settled: the whole population, at the top of the ladder. Nothing
       // left to refine on either axis.
-      const exhaustive = covered && (depth >= maxDepth || !cpEval) && pop.exact;
+      const exhaustive = covered && (depth >= maxDepth || !scoreEval) && pop.exact;
       const candidates = buildCandidates();
       last = { engine: 'obscuro', mode, candidates, depth, maxDepth, batches, evaluated, total, exhaustive };
-      // The world list is bulky (one hidden-piece layout + one cp vector each)
+      // The world list is bulky (one hidden-piece layout + one score vector each)
       // and only meaningfully changes as new worlds get priced, so it rides
       // along on a fraction of the frames rather than every one. The panel keeps
       // the last one it saw.
@@ -1334,26 +1319,26 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
       // running after this call, and a snapshot that aliased them would drift.
       opts.saveWalkState?.({
         exact: pop.exact, maxDepth, order,
-        depth, cursor, evaluated, sweepCount, rungCp, covered, batches,
+        depth, cursor, evaluated, sweepCount, rungScored, covered, batches,
         probSum: new Map(probSum), probW,
-        cpSum: new Map(cpSum), cpMass: new Map(cpMass),
-        settledCp: new Map(settledCp), settledDepth, settledCovered,
+        valueSum: new Map(valueSum), valueMass: new Map(valueMass),
+        settledScore: new Map(settledScore), settledDepth, settledCovered,
         settledWorlds: new Map(settledWorlds), scoredWorlds: new Map(scoredWorlds),
       });
       if (covered) break; // sweep complete — climb to the next rung
     }
 
-    if (rungCp > 0) {
+    if (rungScored > 0) {
       // This rung produced real numbers: they become the floor the next rung's
       // partial results fall back to while it is still filling in.
       settledDepth = depth;
       settledCovered = covered;
-      for (const [key, mass] of cpMass) settledCp.set(key, Math.round(cpSum.get(key) / mass));
+      for (const [key, mass] of valueMass) settledScore.set(key, toScore(valueSum.get(key) / mass));
       if (scoredWorlds.size) settledWorlds = scoredWorlds;
-    } else if (cpEval && depth > 1) {
+    } else if (scoreEval && depth > 1) {
       break; // engine can't reach this depth inside the budget — the ladder tops out
     }
-    if (!cpEval) break; // no engine: depth is meaningless, one sweep is the whole answer
+    if (!scoreEval) break; // no engine: depth is meaningless, one sweep is the whole answer
     if (spent() || !covered) break; // cancelled, out of budget, or the sweep was cut short
   }
 

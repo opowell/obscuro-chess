@@ -21,7 +21,7 @@ that looked reasonable and measurably made play worse). If you're changing a
 default, edit it at its declaration (linked below), not in the aggregate.
 
 **To override one without editing anything**, see [SETTINGS.md](SETTINGS.md).
-Every name in the two aggregates is also a settings key — `chess.LEAF_CLAMP`,
+Every name in the two aggregates is also a settings key — `chess.MAX_SF_DEPTH`,
 `search.DIAL.power.worlds` — settable from a JSON file, the command line, or
 per game. A parameter can be **fixed** (the difficulty dial stops moving it) or
 left to **scale** with the dial, whose own endpoints and curve are settable too.
@@ -51,19 +51,21 @@ Chess adds exactly two things on top of the generic search (see the header of
 skip the fog subgame). Everything else — belief sampling, difficulty scaling,
 move selection — is inherited from §1.
 
-### 2.1 Terminal values and clamps (`src/ObscuroAgent.js`)
+### 2.1 Leaf values and the evaluation ladder (`src/ObscuroAgent.js`)
+
+Leaves have no parameters. The search values a position by the engine's own
+expected result, (wins − losses) / 1000 from Stockfish's win/draw/loss estimate,
+so every value is in [−1, +1]: a captured king is +1, a hung one −1, and a child
+where the opponent has no legal move in standard chess (checkmate or stalemate,
+a forced king loss under fog rules) is +1. These are the paper's bounded
+utilities. They replaced, on 2026-10-01, centipawns clamped at `LEAF_CLAMP` =
+1500 with a win worth `SEARCH_WIN` = 8000, both hand-picked; see the LEAF VALUES
+comment for the measurement. The analysis reports a move's mean value as an
+expected score in per mille.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `LEAF_CLAMP` | 1500 (cp) | material/eval scores are clamped to this so an imagined king capture from phantom hidden pieces can't swamp a real material decision |
-| `SEARCH_WIN` | 8000 (cp) | the search's terminal win/loss magnitude — chess's override of the generic `1e6`, deliberately bounded (~5.3× `LEAF_CLAMP`) because fog terminal values are *averaged* across belief worlds; unbounded win lets one phantom world dominate |
 | `MAX_SF_DEPTH` | 30 | ceiling of the iterative-deepening ladder (a ceiling to climb toward, not a depth usually reached — see `makeIterativeChessLeafEval`) |
-
-`KING_HANG` (= `SEARCH_WIN`) is the value assigned when a move leaves the
-mover's own king capturable — deliberately asymmetric with the `+LEAF_CLAMP`
-cap on *capturing the enemy* king at a leaf (see the file's own comment: an
-imagined capture is phantom-prone, but exposing our own king is a real,
-self-inflicted loss).
 
 ### 2.2 The chess difficulty dial (`CHESS_DIAL`, `src/ObscuroAgent.js`)
 

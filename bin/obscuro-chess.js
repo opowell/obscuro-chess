@@ -5,7 +5,7 @@
 //
 //   obscuro-chess demo --difficulty 60
 //   obscuro-chess config                      # what every parameter is set to
-//   obscuro-chess config --set chess.LEAF_CLAMP=900
+//   obscuro-chess config --set chess.MAX_SF_DEPTH=12
 //   obscuro-chess move-quality --settings sweep.json --arm reach
 //
 // The settings flags are applied BEFORE the target script is imported, so a

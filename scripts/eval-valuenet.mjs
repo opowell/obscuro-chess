@@ -108,7 +108,7 @@ for await (const line of rl) {
   if (pn === best) netTop++;
   if (pm === best) matTop++;
   randTop += 1 / teacher.length;
-  // Regret clipped to the search's own LEAF_CLAMP: raw teacher values encode
+  // Regret clipped at ±300 cp: raw teacher values encode
   // mate as ±100000, and a handful of those would otherwise BE the mean.
   const cl = x => Math.max(-300, Math.min(300, x));
   netRegret += cl(teacher[best]) - cl(teacher[pn]);

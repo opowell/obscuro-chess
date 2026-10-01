@@ -87,16 +87,9 @@ const ZHANG_SANDHOLM_DESIGN = {
     // instead of the dial: cap the iterative-deepening ladder at one rung.
     MAX_SF_DEPTH: 1,
 
-    // A win is worth the EVAL CLAMP, not a multiple of it.
-    //
-    // "The paper bounds ALL utilities (u: Z → [−1,+1], evals clamped inside it)"
-    // (ObscuroAgent.js SEARCH_WIN; vendor/obscuro ObscuroAgent.js `_winValue`).
-    // Under that reading a certain win and a maximal evaluation are the same
-    // number, so SEARCH_WIN = LEAF_CLAMP. This repo ships 8000 ≈ 5.3× the clamp
-    // instead, which also serves as the own-king-hang penalty (`kingHang`);
-    // equalising them gives that up, deliberately, for the comparison.
-    LEAF_CLAMP: 1500,
-    SEARCH_WIN: 1500,
+    // Bounded utilities (u: Z → [−1, +1]) need no setting: the search values
+    // every leaf on the engine's own win/draw/loss scale, with a win worth +1
+    // (ObscuroAgent.js, LEAF VALUES).
 
     // The exact belief, at the paper's size. "paper: |P| usually ≤ 10⁶ (C++);
     // avg ~17k" (exactBelief.js CAP). The time guard rises with it because
