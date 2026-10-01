@@ -115,7 +115,7 @@ trees. The preset puts those back:
 | `chess.CHESS_DIAL.leafEval.cols` | 0 | 5–14 | price exactly the node's children (`cols` is a floor on MultiPV, not a cap) |
 | `chess.MAX_SF_DEPTH` | 1 | 30 | the same design point for a per-move time limit, where the ladder replaces the dial |
 | `chess.SEARCH_WIN` | 1500 | 8000 | utilities are bounded, `u: Z → [−1,+1]`, with evals clamped inside — so a certain win is worth the eval clamp, not 5.3× it |
-| `chess.EXACT_BELIEF_CAP` | 10⁶ | 200,000 | `\|P\|` usually ≤ 10⁶ in the paper's C++ tracker (`TIME_GUARD_MS` rises with it, or the guard decides instead of the cap) |
+| `chess.EXACT_BELIEF_CAP` / `EXACT_BELIEF_TIME_GUARD_MS` | 10⁶ / 60 s | 10⁶ / 4 s | `\|P\|` usually ≤ 10⁶ in the paper's C++ tracker; the longer guard lets an update expand all of a full P instead of a random subset of it |
 | `chess.SAMPLE_ALPHA_DEFAULT` / `REACH_WEIGHTING_DEFAULT` | 0 / 0 | 0 / 0 | worlds are "sampled at random without replacement from the set of possible states", and every world in an information set is equally likely |
 | `chess.MOVE_PRIOR_UNIFORM` | `true` | `false` | the paper has **no opponent model**; the fitted move prior is this repo's addition |
 | `search.PURIFY_MAX_SUPPORT`, `DIAL.*.purifyMax` | 3 | 3 | MaxSupport = 3 (§3.5 / App. C.8) |

@@ -474,8 +474,8 @@ export const FogChess = {
     const belief = getBelief(observation, playerId);
     belief.beginTurn(observation.board, turnKey);
     if (!exact.exact) exact.tryReacquire(observation, belief, turnKey);
-    return (exact.exact && exact.positions?.length)
-      ? { exact: true, total: exact.positions.length, sampled: !!exact.sampled }
+    return exact.size
+      ? { exact: true, total: exact.size, sampled: !!exact.sampled }
       : { exact: false, total: null };
   },
 

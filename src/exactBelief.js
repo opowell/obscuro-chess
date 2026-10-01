@@ -20,7 +20,7 @@
 //     (P is a set of STATES, not histories — the paper does the same, fn. 21).
 //
 // P IS A DISTRIBUTION, NOT JUST A SET. Every member carries a weight in
-// `this.weights` (parallel to `this.positions`, summing to 1), which is what
+// `this.weights` (parallel to the positions, summing to 1), which is what
 // makes "which board is the real one?" answerable at all. Two ingredients:
 //
 //   • The ply advance multiplies a parent's weight by π(move | parent) — a move
@@ -43,7 +43,10 @@
 // visibility test all run on the typed array; visibility is a 2×32-bit mask
 // compared with two integer equality checks; dedupe uses a 53-bit Zobrist
 // hash. This is ~10× faster and ~15× smaller than the previous object-board
-// version, which is what pays for the larger CAP. The typed encodings MUST
+// version, which is what pays for the larger CAP. P itself is stored packed
+// (PositionStore: all positions in one buffer, ~82 bytes each with weight and
+// hash), and the ply sweep tries successors in one scratch buffer, checking
+// only the squares a move touches. The typed encodings MUST
 // mirror src/moves.js (fog pseudo-legal, castle quirks, promotions,
 // en passant) and board.js getVisibleSquares (pawn-block rule, blocker-included
 // rays) exactly — the invariant test replays real recorded games and asserts
@@ -78,13 +81,15 @@ import { param, settingsEpoch } from './config.js';
 
 // Exported so src/settings.js can list them; kept defined here,
 // next to the tracker that tunes them.
-export const CAP = 200000;          // paper: |P| usually ≤ 10⁶ (C++); avg ~17k. Past it, P is resampled to CAP/2
-export const TIME_GUARD_MS = 4000;  // per-turn update budget
+export const CAP = 1000000;         // paper: |P| usually ≤ 10⁶ (C++); avg ~17k. Past it, P is resampled to CAP/2
+export const TIME_GUARD_MS = 4000;  // per-turn update budget; past it, the update finishes on a random subset of P
 export const REACQUIRE_BOUND = 60000;
 
-// Effective values (defaults above; see docs/SETTINGS.md). Raising CAP and
-// TIME_GUARD_MS together is the standard way to trade turn latency for staying
-// exact longer, which is why they are settable rather than baked in.
+// Effective values (defaults above; see docs/SETTINGS.md). Neither ends
+// tracking any more: past CAP, P is resampled, and past the time guard, the
+// update finishes on a random subset of parents (see _advanceOpponent). Raising
+// them together trades turn latency and memory (~82 bytes a position) for
+// staying exact longer, which is why they are settable rather than baked in.
 const cap = () => param('chess.EXACT_BELIEF_CAP', CAP);
 const timeGuardMs = () => param('chess.EXACT_BELIEF_TIME_GUARD_MS', TIME_GUARD_MS);
 const reacquireBound = () => param('chess.REACQUIRE_BOUND', REACQUIRE_BOUND);
@@ -503,64 +508,11 @@ function hashPos(p) {
   return (h1 >>> 11) * 4294967296 + (h2 >>> 0); // 21 + 32 = 53 bits
 }
 
-// --- visibility mask (mirrors board.js getVisibleSquares exactly) -----------
-
 const KNIGHT_D = [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]];
 const KING_D = [[0, 1], [0, -1], [1, 0], [-1, 0], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 const ROOK_D = [[0, 1], [0, -1], [1, 0], [-1, 0]];
 const BISHOP_D = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
 const QUEEN_D = [...ROOK_D, ...BISHOP_D];
-
-// Returns visibility for `sign`'s pieces as a 2×32-bit mask [lo, hi].
-function visibilityMask(p, sign) {
-  let lo = 0, hi = 0;
-  const add = (i) => { if (i < 32) lo |= (1 << i); else hi |= (1 << (i - 32)); };
-  for (let i = 0; i < 64; i++) {
-    const c = p[i];
-    if (!c || (c > 0) !== (sign > 0)) continue;
-    add(i);
-    const f = i & 7, r = i >> 3;
-    const t = c > 0 ? c : -c;
-    if (t === 1) { // pawn: pushes only when unblocked; diagonals always
-      const dr = sign > 0 ? 1 : -1;
-      const r1 = r + dr;
-      if (r1 >= 0 && r1 < 8) {
-        const push = r1 * 8 + f;
-        if (!p[push]) {
-          add(push);
-          if (r === (sign > 0 ? 1 : 6)) {
-            const push2 = (r + 2 * dr) * 8 + f;
-            if (!p[push2]) add(push2);
-          }
-        }
-        if (f > 0) add(r1 * 8 + f - 1);
-        if (f < 7) add(r1 * 8 + f + 1);
-      }
-    } else if (t === 2) {
-      for (const [df, dr] of KNIGHT_D) {
-        const nf = f + df, nr = r + dr;
-        if (nf >= 0 && nf < 8 && nr >= 0 && nr < 8) add(nr * 8 + nf);
-      }
-    } else if (t === 6) {
-      for (const [df, dr] of KING_D) {
-        const nf = f + df, nr = r + dr;
-        if (nf >= 0 && nf < 8 && nr >= 0 && nr < 8) add(nr * 8 + nf);
-      }
-    } else { // sliders: ray includes the first blocker
-      const dirs = t === 4 ? ROOK_D : t === 3 ? BISHOP_D : QUEEN_D;
-      for (const [df, dr] of dirs) {
-        let nf = f + df, nr = r + dr;
-        while (nf >= 0 && nf < 8 && nr >= 0 && nr < 8) {
-          const j = nr * 8 + nf;
-          add(j);
-          if (p[j]) break;
-          nf += df; nr += dr;
-        }
-      }
-    }
-  }
-  return [lo | 0, hi | 0];
-}
 
 // --- fog pseudo-legal move generation (mirrors moves.js getAllFogMoves) -----
 // Moves are {f, t, promo (code 0|2..5), dbl, ep (captured idx | -1), castle
@@ -655,8 +607,12 @@ export function genFogMoves(p, sign) {
 const CR_CLEAR = new Int8Array(64).fill(0xF);
 CR_CLEAR[0] &= ~WQ; CR_CLEAR[7] &= ~WK; CR_CLEAR[56] &= ~BQ; CR_CLEAR[63] &= ~BK;
 
-function applyMove(p, m, sign) {
-  const n = p.slice();
+function applyMove(p, m, sign) { return applyMoveInto(p, m, sign, new Int8Array(STRIDE)); }
+
+// applyMove into `n` (overwritten), so the ply sweep can try every successor in
+// one scratch buffer and copy out only the ones that survive.
+function applyMoveInto(p, m, sign, n) {
+  n.set(p);
   let cr = n[64];
   if (m.castle) {
     const base = sign > 0 ? 0 : 56;
@@ -695,36 +651,254 @@ function initialPosition() {
 }
 
 // Precompute the per-turn observation context used by every consistency check.
+//
+// Our own pieces are the same in every candidate (consistent() rejects any that
+// differ from the observation), so most of OUR visibility is fixed for the whole
+// turn: the squares our pieces stand on, knight and king moves, and pawn
+// diagonals. Only pawn pushes (blocked by whatever stands ahead) and slider rays
+// (which stop at the first piece) depend on where the enemy is. Those are kept
+// as short square lists to walk per candidate; the rest is one precomputed mask.
+// This mirrors board.js getVisibleSquares exactly: pushes only when unblocked
+// (the double push only from the start rank and only through an empty square),
+// diagonals always, and rays include their first blocker.
 function obsContext(observation, mySign) {
   const obsArr = new Int8Array(64);
   for (const sq of Object.keys(observation.board)) {
     const pc = observation.board[sq];
     if (pc) obsArr[sqToIdx(sq)] = PIECE_CODE[pc.type] * signOf(pc.ownerId);
   }
+  const vis = new Uint8Array(64);
   let visLo = 0, visHi = 0;
   for (const sq of observation.visibleSquares ?? []) {
     const i = sqToIdx(sq);
+    vis[i] = 1;
     if (i < 32) visLo |= (1 << i); else visHi |= (1 << (i - 32));
   }
-  visLo |= 0; visHi |= 0;
-  return { obsArr, visLo, visHi, mySign };
+  let stLo = 0, stHi = 0;
+  const add = (i) => { if (i < 32) stLo |= (1 << i); else stHi |= (1 << (i - 32)); };
+  const pawnPush = [];  // pairs: the square ahead, and the double-push square or -1
+  const rays = [];      // one Int8Array of squares per slider direction, nearest first
+  for (let i = 0; i < 64; i++) {
+    const c = obsArr[i];
+    if (!c || (c > 0) !== (mySign > 0)) continue;
+    add(i);
+    const f = i & 7, r = i >> 3;
+    const t = c > 0 ? c : -c;
+    if (t === 1) {
+      const dr = mySign > 0 ? 1 : -1;
+      const r1 = r + dr;
+      if (r1 < 0 || r1 > 7) continue;
+      pawnPush.push(r1 * 8 + f, r === (mySign > 0 ? 1 : 6) ? (r + 2 * dr) * 8 + f : -1);
+      if (f > 0) add(r1 * 8 + f - 1);
+      if (f < 7) add(r1 * 8 + f + 1);
+    } else if (t === 2 || t === 6) {
+      for (const [df, dr] of (t === 2 ? KNIGHT_D : KING_D)) {
+        const nf = f + df, nr = r + dr;
+        if (nf >= 0 && nf < 8 && nr >= 0 && nr < 8) add(nr * 8 + nf);
+      }
+    } else {
+      for (const [df, dr] of (t === 4 ? ROOK_D : t === 3 ? BISHOP_D : QUEEN_D)) {
+        const ray = [];
+        for (let nf = f + df, nr = r + dr; nf >= 0 && nf < 8 && nr >= 0 && nr < 8; nf += df, nr += dr) ray.push(nr * 8 + nf);
+        if (ray.length) rays.push(Int8Array.from(ray));
+      }
+    }
+  }
+  return {
+    obsArr, vis, visLo: visLo | 0, visHi: visHi | 0, mySign,
+    stLo: stLo | 0, stHi: stHi | 0, pawnPush: Int8Array.from(pawnPush), rays,
+  };
 }
 
-// Candidate consistency: (a) every visible square shows exactly the observed
-// content, (b) our pieces match exactly everywhere (the observation always
-// includes ALL our pieces, visible-square or not), (c) the candidate
-// reproduces our exact visibility mask (blocking + pawn rule).
-function consistent(ctx, cand) {
-  const { obsArr, visLo, visHi, mySign } = ctx;
-  for (let i = 0; i < 64; i++) {
-    const vis = i < 32 ? (visLo >>> i) & 1 : (visHi >>> (i - 32)) & 1;
-    const c = cand[i], o = obsArr[i];
-    if (vis) { if (c !== o) return false; }
-    else if ((c > 0) === (mySign > 0) && c !== 0) { if (c !== o) return false; }
-    else if ((o > 0) === (mySign > 0) && o !== 0) { return false; }
+// Whether a candidate may hold `c` on square i: (a) a visible square shows
+// exactly the observed content, (b) our pieces match the observation everywhere
+// (it always includes ALL our pieces, visible-square or not).
+function squareOk(ctx, i, c) {
+  const o = ctx.obsArr[i];
+  if (ctx.vis[i]) return c === o;
+  const mine = ctx.mySign > 0;
+  if (c !== 0 && (c > 0) === mine) return c === o;
+  return o === 0 || (o > 0) !== mine;
+}
+
+// (c) the candidate reproduces our exact visibility mask (blocking + pawn rule).
+// Only meaningful once (b) holds, since the precomputation assumes our pieces.
+function visibilityMatches(ctx, cand) {
+  let lo = ctx.stLo, hi = ctx.stHi;
+  const pp = ctx.pawnPush;
+  for (let k = 0; k < pp.length; k += 2) {
+    const one = pp[k];
+    if (cand[one]) continue;
+    if (one < 32) lo |= (1 << one); else hi |= (1 << (one - 32));
+    const two = pp[k + 1];
+    if (two >= 0 && !cand[two]) { if (two < 32) lo |= (1 << two); else hi |= (1 << (two - 32)); }
   }
-  const [lo, hi] = visibilityMask(cand, mySign);
-  return lo === visLo && hi === visHi;
+  const rays = ctx.rays;
+  for (let k = 0; k < rays.length; k++) {
+    const ray = rays[k];
+    for (let j = 0; j < ray.length; j++) {
+      const sq = ray[j];
+      if (sq < 32) lo |= (1 << sq); else hi |= (1 << (sq - 32));
+      if (cand[sq]) break;
+    }
+  }
+  return (lo | 0) === ctx.visLo && (hi | 0) === ctx.visHi;
+}
+
+// Candidate consistency: (a) and (b) on every square, then (c).
+function consistent(ctx, cand) {
+  for (let i = 0; i < 64; i++) if (!squareOk(ctx, i, cand[i])) return false;
+  return visibilityMatches(ctx, cand);
+}
+
+// The squares a move changes: from, to, an en-passant victim, a castling rook's
+// two squares. Written into `out`; returns how many.
+function touchedSquares(m, sign, out) {
+  let k = 0;
+  out[k++] = m.f; out[k++] = m.t;
+  if (m.ep >= 0) out[k++] = m.ep;
+  if (m.castle) {
+    const base = sign > 0 ? 0 : 56;
+    if (m.castle === 1) { out[k++] = base + 7; out[k++] = base + 5; }
+    else { out[k++] = base; out[k++] = base + 3; }
+  }
+  return k;
+}
+
+// --- storage -----------------------------------------------------------------
+//
+// P is held PACKED: every position's 66 bytes back to back in one Int8Array,
+// with its weight and its hash in parallel Float64Arrays. One Int8Array object
+// per position cost ~300 bytes each in V8 (object headers + a backing store
+// apiece); packed it is 66 + 16. The store grows by doubling while a sweep fills
+// it and is trimmed to size afterwards.
+
+const STRIDE = 66;
+
+class PositionStore {
+  constructor(capacity = 64) {
+    this.buf = new Int8Array(capacity * STRIDE);
+    this.w = new Float64Array(capacity);
+    this.h = new Float64Array(capacity);
+    this.n = 0;
+  }
+
+  get capacity() { return this.w.length; }
+
+  _resize(capacity) {
+    const buf = new Int8Array(capacity * STRIDE); buf.set(this.buf.subarray(0, this.n * STRIDE)); this.buf = buf;
+    const w = new Float64Array(capacity); w.set(this.w.subarray(0, this.n)); this.w = w;
+    const h = new Float64Array(capacity); h.set(this.h.subarray(0, this.n)); this.h = h;
+  }
+
+  push(p, w, h) {
+    if (this.n === this.capacity) this._resize(this.capacity * 2);
+    this.buf.set(p, this.n * STRIDE);
+    this.w[this.n] = w;
+    this.h[this.n] = h;
+    return this.n++;
+  }
+
+  // Copy position i into `dst` (a STRIDE-long scratch buffer).
+  read(i, dst) { dst.set(this.buf.subarray(i * STRIDE, (i + 1) * STRIDE)); return dst; }
+
+  // Position i as a view onto the store: no copy, valid until the store changes.
+  view(i) { return this.buf.subarray(i * STRIDE, (i + 1) * STRIDE); }
+
+  // Keep only the members at `indices` (ascending), with new weights, in place.
+  keep(indices, weights) {
+    for (let j = 0; j < indices.length; j++) {
+      const i = indices[j];
+      if (i !== j) {
+        this.buf.copyWithin(j * STRIDE, i * STRIDE, (i + 1) * STRIDE);
+        this.h[j] = this.h[i];
+      }
+      this.w[j] = weights ? weights[j] : this.w[i];
+    }
+    this.n = indices.length;
+  }
+
+  // Release the slack a sweep left behind.
+  trim() { if (this.capacity > this.n + (this.n >> 2) + 64) this._resize(Math.max(this.n, 1)); }
+
+  // Weights to Σ = 1. Pruning inconsistent successors removed mass, so this is
+  // the conditioning step. A total of 0 can only come from float underflow over
+  // a long game (every surviving world vanishingly unlikely relative to the ones
+  // the observation killed); fall back to uniform rather than propagate NaN,
+  // since a flat belief over the right set is still correct-if-vague, while NaN
+  // weights would silently break sampling.
+  normalize() {
+    const n = this.n, w = this.w;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += w[i];
+    if (sum > 0) { const inv = 1 / sum; for (let i = 0; i < n; i++) w[i] *= inv; }
+    else w.fill(n ? 1 / n : 0, 0, n);
+  }
+}
+
+// Hash → member index, for merging colliding successors. Open addressing over
+// typed arrays: a JS Map keyed by 53-bit numbers boxes every key.
+class HashIndex {
+  constructor(expected = 64) {
+    let size = 64;
+    while (size < expected * 2) size *= 2;
+    this._alloc(size);
+  }
+
+  _alloc(size) {
+    this.keys = new Float64Array(size);
+    this.vals = new Int32Array(size).fill(-1);
+    this.mask = size - 1;
+    this.count = 0;
+  }
+
+  get(h) {
+    const { keys, vals, mask } = this;
+    for (let s = (h >>> 0) & mask; ; s = (s + 1) & mask) {
+      const v = vals[s];
+      if (v < 0) return -1;
+      if (keys[s] === h) return v;
+    }
+  }
+
+  set(h, v) {
+    if ((this.count + 1) * 2 > this.vals.length) this._grow();
+    const { keys, vals, mask } = this;
+    let s = (h >>> 0) & mask;
+    while (vals[s] >= 0) s = (s + 1) & mask;
+    keys[s] = h; vals[s] = v;
+    this.count++;
+  }
+
+  _grow() {
+    const { keys, vals } = this;
+    this._alloc(vals.length * 2);
+    for (let s = 0; s < vals.length; s++) if (vals[s] >= 0) this.set(keys[s], vals[s]);
+  }
+
+  // Rebuild from a store's hashes, member i at index i.
+  static of(store) {
+    const ix = new HashIndex(store.n);
+    for (let i = 0; i < store.n; i++) ix.set(store.h[i], i);
+    return ix;
+  }
+}
+
+// A fixed-seed shuffle of 0..n-1, so a sweep that must stop early has looked at
+// a uniformly random subset of parents, and the same inputs still give the same
+// result.
+function shuffledOrder(n, seed) {
+  const order = new Int32Array(n);
+  for (let i = 0; i < n; i++) order[i] = i;
+  let s = (seed * 0x9e3779b1) | 0;
+  for (let i = n - 1; i > 0; i--) {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    const j = ((t ^ (t >>> 14)) >>> 0) % (i + 1);
+    const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+  }
+  return order;
 }
 
 export class ExactBelief {
@@ -735,8 +909,7 @@ export class ExactBelief {
     this.exact = null;      // null = not initialised; true/false afterwards
     this.approx = false;    // true when P was re-acquired (tight superset)
     this.sampled = false;   // true once P outgrew CAP and became a sample of the belief
-    this.positions = null;  // Int8Array(66)[]
-    this.weights = null;    // Float64Array parallel to positions, Σ = 1
+    this.P = null;          // PositionStore: the positions, their weights (Σ = 1) and hashes
     this.firstTurnDone = false;
     this._lastTurnKey = null;
     // Resolved at construction, not per sweep, so a tracker's model can't change
@@ -744,9 +917,38 @@ export class ExactBelief {
     this._prior = movePrior ?? getDefaultMovePrior();
     this._alpha = alphaBySeat.get(aiColor) ?? getBeliefSampleAlpha();
     this._pi = new Float64Array(256); // per-parent π scratch; grown if needed
+    this._par = new Int8Array(STRIDE);   // the parent being expanded
+    this._child = new Int8Array(STRIDE); // the successor being tried
+    this._sweeps = 0;                    // seeds each sweep's parent order
   }
 
-  _giveUp() { this.exact = false; this.sampled = false; this.positions = null; this.weights = null; }
+  _giveUp() { this.exact = false; this.sampled = false; this.P = null; }
+
+  /** |P|, or 0 when not tracking. */
+  get size() { return this.exact && this.P ? this.P.n : 0; }
+
+  // `positions` and `weights` as arrays, for tests and the calibration harness
+  // (views onto the store, valid until it next changes), and as setters so a test
+  // can build a tracker by hand. The tracker itself works on the packed store.
+  get positions() {
+    if (!this.P) return null;
+    return Array.from({ length: this.P.n }, (_, i) => this.P.view(i));
+  }
+
+  set positions(list) {
+    if (!list) { this.P = null; return; }
+    const P = new PositionStore(Math.max(1, list.length));
+    for (const pos of list) P.push(pos, 1 / list.length, hashPos(pos));
+    this.P = P;
+  }
+
+  get weights() { return this.P ? this.P.w.subarray(0, this.P.n) : null; }
+
+  // null means "no posterior": uniform.
+  set weights(w) {
+    if (!this.P) return;
+    for (let i = 0; i < this.P.n; i++) this.P.w[i] = w ? w[i] : 1 / this.P.n;
+  }
 
   /**
    * The sampling exponent this tracker resolved at construction. Public because
@@ -755,22 +957,6 @@ export class ExactBelief {
    * weight — see FogChess.sampleWorlds.
    */
   get sampleAlpha() { return this._alpha; }
-
-  // Normalize a freshly built weight array to Σ = 1. Pruning inconsistent
-  // successors removed mass, so this is the conditioning step. A total of 0 can
-  // only come from float underflow over a long game (every surviving world
-  // vanishingly unlikely relative to the ones the observation killed); fall back
-  // to uniform rather than propagate NaN, since a flat belief over the right set
-  // is still correct-if-vague, while NaN weights would silently break sampling.
-  _setWeights(list) {
-    const n = list.length;
-    const w = new Float64Array(n);
-    let sum = 0;
-    for (let i = 0; i < n; i++) sum += list[i];
-    if (sum > 0) { const inv = 1 / sum; for (let i = 0; i < n; i++) w[i] = list[i] * inv; }
-    else w.fill(n ? 1 / n : 0);
-    this.weights = w;
-  }
 
   /**
    * Advance + filter P for this turn. Idempotent per `turnKey` (the agent may
@@ -790,28 +976,30 @@ export class ExactBelief {
       this.firstTurnDone = true;
       // Exactness needs the full history: only attach at the game's first turn.
       if ((observation.turnNumber ?? 1) !== 1) { this._giveUp(); return; }
-      this.positions = [initialPosition()];
-      this.weights = Float64Array.of(1); // common knowledge: one world, certainly
+      const start = initialPosition();
+      this.P = new PositionStore(1);
+      this.P.push(start, 1, hashPos(start)); // common knowledge: one world, certainly
       this.exact = true;
       if (this.aiColor === 'black') {
         this._advanceOpponent(ctx, t0); // white has already made one ply
       } else {
-        // Filter positions and weights in LOCKSTEP — they are parallel arrays and
-        // a `positions.filter()` that leaves `weights` alone silently misaligns
-        // every world with someone else's probability.
-        const kept = [], keptW = [];
-        for (let i = 0; i < this.positions.length; i++) {
-          if (!consistent(ctx, this.positions[i])) continue;
-          kept.push(this.positions[i]);
-          keptW.push(this.weights[i]);
-        }
-        this.positions = kept;
-        this._setWeights(keptW);
+        this._filter(ctx);
       }
     } else {
       this._advanceOpponent(ctx, t0);
     }
-    if (this.exact && (!this.positions || this.positions.length === 0)) this._giveUp();
+    if (this.exact && (!this.P || this.P.n === 0)) this._giveUp();
+  }
+
+  // Drop the members inconsistent with `ctx`, in place, and renormalize.
+  _filter(ctx) {
+    const P = this.P;
+    const par = this._par;
+    const kept = [];
+    for (let i = 0; i < P.n; i++) if (consistent(ctx, P.read(i, par))) kept.push(i);
+    P.keep(kept, null);
+    P.normalize();
+    P.trim();
   }
 
   /**
@@ -822,7 +1010,7 @@ export class ExactBelief {
    * worlds disagreed about), and those weights must be SUMMED, not dropped.
    */
   commitOurMove(action) {
-    if (!this.exact || !this.positions || !action?.from) return;
+    if (!this.exact || !this.P || !action?.from) return;
     const m = {
       f: sqToIdx(action.from),
       t: sqToIdx(action.to),
@@ -831,26 +1019,25 @@ export class ExactBelief {
       ep: action.isEnPassant && action.capturedSquare ? sqToIdx(action.capturedSquare) : -1,
       castle: action.type === 'castle' ? (action.side === 'kingside' ? 1 : 2) : 0,
     };
-    const next = [];
-    const nextW = [];
-    const seen = new Map(); // hash → index into next
-    const W = this.weights;
-    for (let i = 0; i < this.positions.length; i++) {
-      const pos = this.positions[i];
-      const mover = pos[m.f];
+    const P = this.P;
+    const next = new PositionStore(Math.max(1, P.n));
+    const seen = new HashIndex(P.n);
+    const par = this._par, child = this._child;
+    for (let i = 0; i < P.n; i++) {
+      P.read(i, par);
+      const mover = par[m.f];
       if (!mover || (mover > 0) !== (this.mySign > 0)) continue; // inconsistent
-      const np = applyMove(pos, m, this.mySign);
-      const w = W ? W[i] : 1;
-      const h = hashPos(np);
+      applyMoveInto(par, m, this.mySign, child);
+      const w = P.w[i];
+      const h = hashPos(child);
       const at = seen.get(h);
-      if (at !== undefined) { nextW[at] += w; continue; }
-      seen.set(h, next.length);
-      next.push(np);
-      nextW.push(w);
+      if (at >= 0) { next.w[at] += w; continue; }
+      seen.set(h, next.push(child, w, h));
     }
-    this.positions = next;
-    if (next.length === 0) { this._giveUp(); return; }
-    this._setWeights(nextW);
+    if (next.n === 0) { this._giveUp(); return; }
+    next.normalize();
+    next.trim();
+    this.P = next;
   }
 
   /**
@@ -864,17 +1051,9 @@ export class ExactBelief {
    * observation of the position the move produced.
    */
   observeAfterOurMove(observation) {
-    if (!this.exact || !this.positions) return;
-    const ctx = obsContext(observation, this.mySign);
-    const kept = [], keptW = [];
-    for (let i = 0; i < this.positions.length; i++) {
-      if (!consistent(ctx, this.positions[i])) continue;
-      kept.push(this.positions[i]);
-      keptW.push(this.weights ? this.weights[i] : 1);
-    }
-    this.positions = kept;
-    if (kept.length === 0) { this._giveUp(); return; }
-    this._setWeights(keptW);
+    if (!this.exact || !this.P) return;
+    this._filter(obsContext(observation, this.mySign));
+    if (this.P.n === 0) this._giveUp();
   }
 
   // One opponent ply: successors of every position under every fog-legal
@@ -888,7 +1067,7 @@ export class ExactBelief {
   //     pruning, because that list is the opponent's actual choice set. The mass
   //     on moves we then prune (they'd have captured our king, or the successor
   //     contradicts what we see) is evidence, and dropping it is the Bayesian
-  //     update — _setWeights renormalizes what survives.
+  //     update — normalize() renormalizes what survives.
   //   • Colliding successors ACCUMULATE. P is a set of states, so two histories
   //     landing on one position are one member with the sum of their
   //     probabilities. Dropping the second (what a Set does) is exactly the line
@@ -899,57 +1078,74 @@ export class ExactBelief {
   //     and the total — so successors of later parents are added exactly as
   //     before, and the final renormalization conditions on the observation as
   //     it always did.
+  //   • Parents are taken in a shuffled order, so if the time guard runs out
+  //     part-way, the parents expanded so far are a uniformly random subset of
+  //     P. Every parent had the same chance of being in it, so their successors,
+  //     renormalized, are an unbiased estimate of the full update: P becomes a
+  //     sample instead of being abandoned.
+  //
+  // A successor differs from its parent only on the squares the move touches.
+  // So the parent is checked against the observation once, and a successor
+  // needs only (i) every square where the parent disagreed to be touched by the
+  // move, (ii) the touched squares to agree, and (iii) our visibility to match.
+  // A parent that disagrees on more squares than any move touches (5, castling)
+  // has no consistent successor at all and is skipped without generating moves.
   _advanceOpponent(ctx, t0) {
     const oppSign = -this.mySign;
     const myKing = 6 * this.mySign;
-    const { obsArr, visLo, visHi } = ctx;
-    let next = [];
-    let nextW = [];
-    let hashes = [];        // parallel to next, so a resample can rebuild `seen`
-    let seen = new Map();   // hash → index into next
-    const W = this.weights;
+    const P = this.P;
+    let next = new PositionStore(Math.max(64, P.n));
+    let seen = new HashIndex(P.n);
     const prior = this._prior;
-    for (let pi = 0; pi < this.positions.length; pi++) {
-      const pos = this.positions[pi];
-      if (Date.now() - t0 > timeGuardMs()) { this._giveUp(); return; }
-      const moves = genFogMoves(pos, oppSign);
+    const par = this._par, child = this._child;
+    const bad = new Int8Array(5);
+    const touched = new Int8Array(5);
+    const order = shuffledOrder(P.n, ++this._sweeps);
+    const guard = timeGuardMs();
+    for (let k = 0; k < P.n; k++) {
+      // Out of time: stop, if anything consistent has been found yet. If not,
+      // carry on — finishing late beats having no belief at all.
+      if (next.n > 0 && Date.now() - t0 > guard) { this.sampled = true; break; }
+      const pi = order[k];
+      P.read(pi, par);
+      let nBad = 0;
+      for (let i = 0; i < 64 && nBad <= 5; i++) if (!squareOk(ctx, i, par[i])) bad[nBad++] = i;
+      if (nBad > 5) continue;
+      const moves = genFogMoves(par, oppSign);
       if (moves.length === 0) continue; // the opponent DID move
       if (moves.length > this._pi.length) this._pi = new Float64Array(moves.length * 2);
       const pmf = this._pi;
-      prior(pos, moves, oppSign, pmf);
-      const pw = W ? W[pi] : 1;
-      for (let j = 0; j < moves.length; j++) {
+      prior(par, moves, oppSign, pmf);
+      const pw = P.w[pi];
+      moves: for (let j = 0; j < moves.length; j++) {
         const m = moves[j];
         // Capturing our king ends the game — it didn't, so prune.
-        if (pos[m.t] === myKing) continue;
-        // Cheap pre-filter: a visible destination must show the moved piece.
-        const vis = m.t < 32 ? (visLo >>> m.t) & 1 : (visHi >>> (m.t - 32)) & 1;
-        if (vis && !m.castle) {
-          const after = m.promo ? m.promo * oppSign : pos[m.f];
-          if (obsArr[m.t] !== after) continue;
+        if (par[m.t] === myKing) continue;
+        const nT = touchedSquares(m, oppSign, touched);
+        for (let b = 0; b < nBad; b++) {
+          let hit = false;
+          for (let t = 0; t < nT; t++) if (touched[t] === bad[b]) { hit = true; break; }
+          if (!hit) continue moves;
         }
-        const np = applyMove(pos, m, oppSign);
-        if (!consistent(ctx, np)) continue;
+        applyMoveInto(par, m, oppSign, child);
+        for (let t = 0; t < nT; t++) if (!squareOk(ctx, touched[t], child[touched[t]])) continue moves;
+        if (!visibilityMatches(ctx, child)) continue;
         const w = pw * pmf[j];
-        const h = hashPos(np);
+        const h = hashPos(child);
         const at = seen.get(h);
-        if (at !== undefined) { nextW[at] += w; continue; }
-        seen.set(h, next.length);
-        next.push(np);
-        nextW.push(w);
-        hashes.push(h);
-        if (next.length > cap()) {
-          const kept = resample(nextW, Math.max(1, Math.floor(cap() / 2)));
-          next = kept.indices.map(i => next[i]);
-          hashes = kept.indices.map(i => hashes[i]);
-          nextW = kept.weights;
-          seen = new Map(hashes.map((hk, i) => [hk, i]));
+        if (at >= 0) { next.w[at] += w; continue; }
+        seen.set(h, next.push(child, w, h));
+        if (next.n > cap()) {
+          const kept = resample(next.w.subarray(0, next.n), Math.max(1, Math.floor(cap() / 2)));
+          next.keep(kept.indices, kept.weights);
+          seen = HashIndex.of(next);
           this.sampled = true;
         }
       }
     }
-    this.positions = next;
-    this._setWeights(nextW);
+    next.normalize();
+    next.trim();
+    this.P = next;
   }
 
   /**
@@ -1041,8 +1237,7 @@ export class ExactBelief {
     };
     if (!place(0, base)) return; // bailed on cap/time
     if (out.length === 0 || out.length > cap()) return;
-    this.positions = out;
-    this._setWeights(new Array(out.length).fill(1)); // no history → no posterior
+    this.positions = out;            // uniform weights: no history → no posterior
     this.exact = true;
     this.approx = true;              // superset, not the literal history-exact P
     this.sampled = false;
@@ -1065,14 +1260,14 @@ export class ExactBelief {
    *
    * Efraimidis–Spirakis exponential race: draw E_i ~ Exp(1)/w_i^α and keep the n
    * smallest. One O(|P|) pass with a kept-sorted array of size n (a handful), so
-   * no 200k-entry index array and no full sort. Weight 0 sorts last, which is
+   * no 10⁶-entry index array and no full sort. Weight 0 sorts last, which is
    * what "possible but vanishingly unlikely" should do.
    */
   samplePositions(n, rng = Math.random) {
     const idx = this.sampleIndices(n, rng);
     if (!idx) return null;
     return idx.map(i => {
-      const p = this.positions[i];
+      const p = this.P.view(i);
       return { board: toBoardObject(p), cr: crObjectOf(p), ep: epOf(p) };
     });
   }
@@ -1085,12 +1280,12 @@ export class ExactBelief {
    * be overridden per call for that comparison.
    */
   sampleIndices(n, rng = Math.random, alpha = this._alpha) {
-    if (!this.exact || !this.positions?.length) return null;
-    const P = this.positions;
-    if (P.length <= n) return P.map((_, i) => i);
-    const W = alpha === 0 ? null : this.weights;
+    if (!this.size) return null;
+    const N = this.P.n;
+    if (N <= n) return Array.from({ length: N }, (_, i) => i);
+    const W = alpha === 0 ? null : this.P.w;
     const best = []; // { key, i }, ascending by key
-    for (let i = 0; i < P.length; i++) {
+    for (let i = 0; i < N; i++) {
       const w = W ? (alpha === 1 ? W[i] : Math.pow(W[i], alpha)) : 1;
       // rng() can legitimately return 0; -log(0) would make every such world an
       // unbreakable last place rather than a very-unlikely one.
@@ -1117,13 +1312,13 @@ export class ExactBelief {
    * draw.) See ObscuroAgent.cpSumsOverWorlds.
    */
   positionsAt(indices) {
-    if (!this.exact || !this.positions?.length) return null;
-    const P = this.positions;
-    const W = this.weights;
+    if (!this.size) return null;
+    const P = this.P;
     const out = [];
     for (const i of indices) {
-      const p = P[i];
-      if (p) out.push({ board: toBoardObject(p), cr: crObjectOf(p), ep: epOf(p), w: W ? W[i] : 1 / P.length });
+      if (!(i >= 0 && i < P.n)) continue;
+      const p = P.view(i);
+      out.push({ board: toBoardObject(p), cr: crObjectOf(p), ep: epOf(p), w: P.w[i] });
     }
     return out;
   }
@@ -1156,18 +1351,17 @@ export class ExactBelief {
    * label them too). Null when exact tracking isn't active.
    */
   rankByLikelihood(limit = 32) {
-    if (!this.exact || !this.positions?.length) return null;
-    const P = this.positions;
-    // A tracker built by hand (tests) or an older path may have no weights; a
-    // flat distribution is the honest reading of "no posterior available".
-    const probs = this.weights ?? new Float64Array(P.length).fill(1 / P.length);
+    if (!this.size) return null;
+    const N = this.P.n;
+    // A copy: the caller may hold it while the store is filtered in place.
+    const probs = this.P.w.slice(0, N);
 
     // Bounded selection rather than a full sort of up to CAP entries: `limit` is
     // a UI page size (tens), so an insertion into a kept-sorted small array is
     // cheaper than ordering the whole set.
-    const cap = Math.max(1, Math.min(limit, P.length));
+    const cap = Math.max(1, Math.min(limit, N));
     const top = [];
-    for (let k = 0; k < P.length; k++) {
+    for (let k = 0; k < N; k++) {
       const w = probs[k];
       if (top.length === cap && w <= top[top.length - 1].prob) continue;
       let i = top.length;
@@ -1176,7 +1370,7 @@ export class ExactBelief {
       if (top.length > cap) top.pop();
     }
 
-    return { total: P.length, probs, top, approx: !!this.approx, sampled: !!this.sampled };
+    return { total: N, probs, top, approx: !!this.approx, sampled: !!this.sampled };
   }
 }
 

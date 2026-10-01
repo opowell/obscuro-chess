@@ -299,6 +299,39 @@ test('exact belief: past CAP, P is resampled rather than abandoned', () => {
   } finally { resetSettings(); }
 });
 
+test('exact belief: out of time, the update finishes on the parents it reached', () => {
+  // Six parents: White's king on e1, Black's king somewhere on the 8th rank, all
+  // hidden from White. A guard of −1 ms is out of time from the start, so the
+  // sweep expands parents only until one has a consistent successor, and stops.
+  const players = [{ id: 'white', name: 'W' }, { id: 'black', name: 'B' }];
+  const wK = { id: 'wK', ownerId: 'white', type: 'king', position: 'e1', alive: true };
+  const bKAt = (sq) => ({ id: 'bK', ownerId: 'black', type: 'king', position: sq, alive: true });
+  const base = FogChess.createInitialState(players, { fogOfWar: true, fog: true });
+  const view = FogChess.getVisibleState(
+    { ...base, board: { e1: wK, a8: bKAt('a8') }, units: [wK], turnNumber: 99 }, 'white');
+  const build = () => {
+    const b = new ExactBelief('white', UNIFORM_PRIOR);
+    b.exact = true;
+    b.firstTurnDone = true;
+    b.positions = ['a8', 'b8', 'c8', 'd8', 'f8', 'h8'].map(sq => fromBoardObject({ e1: wK, [sq]: bKAt(sq) }, null, null));
+    return b;
+  };
+  const full = build();
+  full.beginTurn(view, 99);
+  assert.equal(full.sampled, false, 'in time, every parent is expanded');
+
+  setOverrides({ chess: { EXACT_BELIEF_TIME_GUARD_MS: -1 } });
+  try {
+    const cut = build();
+    cut.beginTurn(view, 99);
+    assert.equal(cut.exact, true, 'running out of time no longer gives up');
+    assert.equal(cut.sampled, true, 'and says P is now a sample');
+    assert.ok(cut.size > 0 && cut.size < full.size, `${cut.size} successors of one parent, of ${full.size}`);
+    const sum = [...cut.weights].reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(sum - 1) < 1e-9, `weights sum to 1, got ${sum}`);
+  } finally { resetSettings(); }
+});
+
 test('exact belief: attaching mid-game gives up gracefully', () => {
   const state = FogChess.createInitialState(
     [{ id: 'white', name: 'W' }, { id: 'black', name: 'B' }],

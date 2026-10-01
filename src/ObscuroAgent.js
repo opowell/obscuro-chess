@@ -894,7 +894,7 @@ function weightOrder(probs, n) {
 // available to sort by — every world covered exactly once, but early batches
 // aren't spatially biased toward one region of the position set. Built once per
 // analysis session (not per batch); an n-int array for n up to the exact tracker's
-// cap (~200k) is a few MB, released when the walk ends.
+// cap (~10⁶) is a few MB, released when the walk ends.
 function shuffledIndices(n, rng) {
   const idx = new Array(n);
   for (let i = 0; i < n; i++) idx[i] = i;
@@ -1017,7 +1017,7 @@ export async function analyzeObscuroProgressive(state, legalActions, opts) {
   // The panel additionally lets a viewer look at the population itself: step
   // through the most likely boards, or ask which board makes a particular
   // candidate move look best. Both need individual worlds kept, so gather them
-  // alongside the aggregates — bounded, since the population runs to ~200k and
+  // alongside the aggregates — bounded, since the population runs to ~10⁶ and
   // this is a payload that crosses a Worker/SSE boundary every few frames.
   //
   // Only under fog. With perfect information there is nothing hidden to guess at

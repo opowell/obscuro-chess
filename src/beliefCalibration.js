@@ -79,21 +79,21 @@ export function replayBelief(sess, aiColor, { game = FogChess, movePrior = null,
       if (!tracker.exact) { gaveUpAtPly = i; break; }
 
       // Compare on the typed representation, not via toBoardObject + string keys:
-      // |P| runs to 200k and this loop runs at every turn of every game of every
+      // |P| runs to 10⁶ and this loop runs at every turn of every game of every
       // prior being compared, so an object allocation per member would dominate
       // the whole harness.
       const truth = fromBoardObject(state.board, null, null);
-      const P = tracker.positions;
+      const N = tracker.size;
       const W = tracker.weights;
       let mass = 0, ties = 0, best = 0;
       const trueIdx = new Set();
-      for (let j = 0; j < P.length; j++) {
-        const p = P[j];
+      for (let j = 0; j < N; j++) {
+        const p = tracker.P.view(j);
         let same = true;
         for (let s = 0; s < 64; s++) if (p[s] !== truth[s]) { same = false; break; }
         if (!same) continue;
         trueIdx.add(j);
-        const w = W ? W[j] : 1 / P.length;
+        const w = W[j];
         mass += w; ties++;
         if (w > best) best = w;
       }
@@ -102,7 +102,7 @@ export function replayBelief(sess, aiColor, { game = FogChess, movePrior = null,
       let rank = null;
       if (ties > 0) {
         rank = 1;
-        for (let j = 0; j < P.length; j++) if ((W ? W[j] : 1 / P.length) > best) rank++;
+        for (let j = 0; j < N; j++) if (W[j] > best) rank++;
       }
       // SAMPLE COVERAGE — the number that actually explains the strength result.
       // The search does not consume the posterior; it consumes an n-world DRAW from
@@ -123,11 +123,11 @@ export function replayBelief(sess, aiColor, { game = FogChess, movePrior = null,
 
       turns.push({
         ply: i,
-        size: P.length,
+        size: N,
         found: ties > 0,
         mass, ties, rank, ms,
         logLoss: mass > 0 ? -Math.log(mass) : Infinity,
-        logSize: Math.log(P.length), // the flat-posterior baseline
+        logSize: Math.log(N), // the flat-posterior baseline
         hit1, hit0,
       });
       tracker.commitOurMove(pa.action);

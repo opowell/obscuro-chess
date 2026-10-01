@@ -274,7 +274,7 @@ justified α=0 now points the other way, and the seat-swapped self-play result
 it. That is the honest state.
 
 **2026-08-16: α is now resolved, and α=1 ships.** The table above, and the flat
-`+0.21 ± 1.08` that followed it, were both taken at the default `CAP = 200,000` /
+`+0.21 ± 1.08` that followed it, were both taken at the then-default `CAP = 200,000` /
 `TIME_GUARD_MS = 4,000` — which abandons exactness, stickily for the rest of the
 game, on precisely the high-|P| turns where α does its work. Remeasured at
 `CAP = 2e6` / 180 s on the crawl games π was *not* fitted to, 300 discovery + 300
