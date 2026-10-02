@@ -53,15 +53,25 @@ move selection — is inherited from §1.
 
 ### 2.1 Leaf values and the evaluation ladder (`src/ObscuroAgent.js`)
 
-Leaves have no parameters. The search values a position by the engine's own
-expected result, (wins − losses) / 1000 from Stockfish's win/draw/loss estimate,
-so every value is in [−1, +1]: a captured king is +1, a hung one −1, and a child
-where the opponent has no legal move in standard chess (checkmate or stalemate,
-a forced king loss under fog rules) is +1. These are the paper's bounded
-utilities. They replaced, on 2026-10-01, centipawns clamped at `LEAF_CLAMP` =
-1500 with a win worth `SEARCH_WIN` = 8000, both hand-picked; see the LEAF VALUES
-comment for the measurement. The analysis reports a move's mean value as an
-expected score in per mille.
+Leaves have no hand-set parameters. The search values a position by its
+expected result UNDER FOG, P(win) − P(loss) for the side the value is for, so
+every value is in [−1, +1]: a captured king is +1, a hung one −1, and a child
+where the opponent has no legal move in standard chess (a forced king loss under
+fog rules) is +1. P(win) comes from `FOG_VALUE_MODEL` (`src/fogValueModel.js`),
+a logistic model of the game's result given Stockfish's expected score, the
+material on the board and the colour to move, fitted by
+`scripts/fit-fog-value.mjs` on 174,246 positions from 2,853 Chess.com fog games.
+Held out by game it predicts results at log-loss 0.567 nats, against 1.007 for
+Stockfish's own full-information expected score and 0.693 for a coin flip:
+under fog, positions Stockfish calls lost are still won ~15% of the time and
+ones it calls won only ~80%.
+
+History: centipawns clamped at `LEAF_CLAMP` = 1500 with a win worth
+`SEARCH_WIN` = 8000, hand-picked, until 2026-10-01; Stockfish's full-information
+win/draw/loss until 2026-10-02, which left the king capturable on 52–54% of 300
+hidden threats (`scripts/hidden-threats.mjs`; fog values 15.7%, centipawns 14%,
+humans 38%). The analysis reports a move's mean value as an expected score in
+per mille.
 
 | Parameter | Default | Meaning |
 |---|---|---|
