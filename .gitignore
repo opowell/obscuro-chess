@@ -7,4 +7,5 @@ node_modules/
 # reproducible by definition, so it never belongs in a commit.
 vendor/stockfish/sf-cache.*
 vendor/stockfish/move-quality/
+vendor/stockfish/fog-value/
 *.code-workspace
