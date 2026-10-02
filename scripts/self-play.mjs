@@ -21,18 +21,34 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+import { FOG_MODEL_ARMS } from './fog-model-arms.mjs';
+
+// Arms combine with '+' (options merged), e.g. --arms bal,bal+pure.
 const ARMS = {
   // Leaf values as shipped: expected result under fog (fogValueModel.js).
   fog: {},
   // Stockfish's full-information win/draw/loss, the value model of 2026-10-01/02.
   wdl: { leafScale: 'wdl' },
+  // The safety test and fresh-world alternate value before 2026-10-02: p_max
+  // alone, and ṽ(h) from the world's best child. Almost never mixes.
+  pure: { freshAlt: 'bestChild', marginSafe: false },
+  // Only the fresh-world alternate value as before (the margin test kept).
+  bestchild: { freshAlt: 'bestChild' },
+  ...FOG_MODEL_ARMS,
 };
+
+function armOpts(name) {
+  return Object.assign({}, ...name.split('+').map(p => {
+    if (!ARMS[p]) throw new Error(`unknown arm ${p}; known: ${Object.keys(ARMS).join(', ')} (combine with +)`);
+    return ARMS[p];
+  }));
+}
 
 async function main() {
   const { makeArgReader } = await import('../src/cli.js');
   const arg = makeArgReader(process.argv.slice(2));
   const [A, B] = arg('arms', 'fog,wdl').split(',');
-  for (const a of [A, B]) if (!ARMS[a]) throw new Error(`unknown arm ${a}; known: ${Object.keys(ARMS).join(', ')}`);
+  for (const a of [A, B]) armOpts(a);   // throws on an unknown arm
   const pairs = Number(arg('pairs', '50'));
   const dial = Number(arg('dial', '30'));
   const maxTurns = Number(arg('max-turns', '200'));
@@ -80,6 +96,10 @@ async function main() {
   console.log(`\n${A} vs ${B}, dial ${dial}: ${ok.length} games (${results.length - ok.length} errors), white won ${whiteWins}`);
   console.log(`  ${A} scored ${(100 * mean).toFixed(1)}% ± ${(100 * se).toFixed(1)}`);
   console.log(`  pairs: ${A} won both ${aBoth}, ${B} won both ${bBoth}, split ${split}`);
+  for (const [side, arm] of [['A', A], ['B', B]]) {
+    const fog = ok.reduce((a, r) => a + (r.tally?.[side].fog ?? 0), 0), safe = ok.reduce((a, r) => a + (r.tally?.[side].safe ?? 0), 0);
+    console.log(`  ${arm}: allowed to mix on ${safe} of ${fog} fog decisions (${fog ? (100 * safe / fog).toFixed(1) : '—'}%)`);
+  }
   for (const r of results.filter(x => x.error).slice(0, 3)) console.log('  error:', r.error.split('\n')[0]);
   process.exit(0);
 }
@@ -104,12 +124,26 @@ async function worker() {
       await recycleEngine();
       // Same seed for both games of a pair, and per seat, so the pair differs
       // only in which arm sits where.
-      const make = (arm, seat) => new ChessObscuroAgent({ rng: mulberry32(7919 * pair + (seat === 'white' ? 1 : 2)), ...knobs, ...ARMS[arm] });
-      const agents = aIsWhite ? { white: make(A, 'white'), black: make(B, 'black') } : { white: make(B, 'white'), black: make(A, 'black') };
+      // Each agent also tallies its fog decisions and how many purification was
+      // allowed to mix (the gadget reported safe), off its analysis record.
+      const tally = { A: { fog: 0, safe: 0 }, B: { fog: 0, safe: 0 } };
+      const make = (arm, seat, side) => {
+        const agent = new ChessObscuroAgent({ rng: mulberry32(7919 * pair + (seat === 'white' ? 1 : 2)), ...knobs, ...armOpts(arm) });
+        const choose = agent.chooseAction.bind(agent);
+        agent.chooseAction = async (...args) => {
+          agent.lastAnalysis = null;
+          const a = await choose(...args);
+          const an = agent.lastAnalysis;
+          if (an?.worlds > 1) { tally[side].fog++; if (an.safe) tally[side].safe++; }
+          return a;
+        };
+        return agent;
+      };
+      const agents = aIsWhite ? { white: make(A, 'white', 'A'), black: make(B, 'black', 'B') } : { white: make(B, 'white', 'B'), black: make(A, 'black', 'A') };
       // A fresh players array per game: belief trackers are keyed by its identity.
       const players = [{ id: 'white', name: 'White' }, { id: 'black', name: 'Black' }];
       const { result, plies } = await playMatch(agents, { game: FogChess, players, maxTurns, config: { difficulty: dial, aiTimeMs: null } });
-      parentPort.postMessage({ id, pair, aIsWhite, winner: result?.winnerId ?? null, plies });
+      parentPort.postMessage({ id, pair, aIsWhite, winner: result?.winnerId ?? null, plies, tally });
     } catch (e) {
       parentPort.postMessage({ id, pair, aIsWhite, error: String(e?.stack ?? e) });
     }

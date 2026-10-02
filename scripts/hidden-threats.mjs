@@ -24,6 +24,10 @@
 //   base    the shipped search
 //   mix     always sample from the purified mixed strategy when there is more
 //           than one world (safePmaxThreshold above any pmax)
+//   pure    the safety test and fresh-world alternate value before 2026-10-02
+//           (p_max alone; ṽ(h) from the best child), which almost never mixed
+//   bestchild only the fresh-world alternate value as before
+//   fog0, balseen  other fog value models (scripts/fog-model-arms.mjs)
 //
 // Also reported per arm: the belief's posterior mass on positions where the king
 // is capturable, the search's root reach on such worlds, and the chosen move's
@@ -42,16 +46,32 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FogChess } from '../src/FogChess.js';
 import { isAttackedBy } from '../src/board.js';
+import { FOG_MODEL_ARMS } from './fog-model-arms.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 // A settings overlay per arm. Applied with setOverrides inside the worker, so
 // each worker thread holds exactly one arm's settings while it runs a probe.
+// `agent` holds agent options rather than settings (fog value models, below).
 const ARMS = {
   base: {},
   mix: { search: { SEARCH_DEFAULTS: { safePmaxThreshold: 2 } } },
+  pure: { agent: { freshAlt: 'bestChild', marginSafe: false } },
+  bestchild: { agent: { freshAlt: 'bestChild' } },
+  ...Object.fromEntries(Object.entries(FOG_MODEL_ARMS).map(([k, v]) => [k, { agent: v }])),
 };
 
+
+// 'a+b' combines arms: settings merged one level deep, agent options merged.
+function armOverlay(name) {
+  const out = {};
+  for (const part of name.split('+')) {
+    const o = ARMS[part];
+    if (!o) throw new Error(`unknown arm ${part}; known: ${Object.keys(ARMS).join(', ')} (combine with +)`);
+    for (const [k, v] of Object.entries(o)) out[k] = { ...(out[k] ?? {}), ...v };
+  }
+  return out;
+}
 
 async function main() {
   const { makeArgReader } = await import('../src/cli.js');
@@ -59,7 +79,7 @@ async function main() {
   const arg = makeArgReader(argv);
   const sessions = arg('sessions', join(HERE, '..', 'test', 'fixtures'));
   const arms = arg('arms', 'base,mix').split(',');
-  for (const a of arms) if (!ARMS[a]) throw new Error(`unknown arm ${a}; known: ${Object.keys(ARMS).join(', ')}`);
+  for (const a of arms) armOverlay(a);   // throws on an unknown arm
   const nProbes = Number(arg('probes', '200'));
   const dial = Number(arg('dial', '30'));
   const workers = Number(arg('workers', String(Math.max(1, availableParallelism() - 1))));
@@ -105,7 +125,7 @@ async function main() {
     const mean = xs => xs.reduce((s, x) => s + x, 0) / (xs.length || 1);
     console.log(`  ${a.padEnd(6)} hung ${hung}/${ok.length} (${(100 * hung / ok.length).toFixed(1)}%)  ` +
       `mean strategy on safe moves ${(100 * mean(ok.map(r => r.defend))).toFixed(1)}%  ` +
-      `pmax=1 in ${ok.filter(r => r.pmax >= 0.999).length}  errors ${rs.length - ok.length}`);
+      `pmax=1 in ${ok.filter(r => r.pmax >= 0.999).length}  safe to mix in ${ok.filter(r => r.safe).length}  errors ${rs.length - ok.length}`);
     console.log(`         true-board expected-score loss per decision: mean ${mean(ok.map(r => r.loss)).toFixed(2)} points; ` +
       `when hung: mean ${mean(ok.filter(r => r.hung).map(r => r.loss)).toFixed(1)}; ` +
       `best defence worth ≥ 10%: ${ok.filter(r => r.bestSafe >= 10).length} probes, hung in ${ok.filter(r => r.bestSafe >= 10 && r.hung).length}`);
@@ -226,13 +246,13 @@ async function worker() {
     try {
       resetSettings();
       // The belief must not depend on the clock (see move-quality.mjs).
-      const overlay = ARMS[arm];
+      const { agent: agentOpts, ...overlay } = armOverlay(arm);
       setOverrides({ ...overlay, chess: { ...(overlay.chess ?? {}), EXACT_BELIEF_TIME_GUARD_MS: 3600000 } });
       await recycleEngine();
       const sess = games[gi].sess;
       const players = JSON.parse(JSON.stringify(sess.params.players));
       let st = FogChess.createInitialState(players, { ...sess.params.config, aiTimeMs: null, difficulty: workerData.dial });
-      const agent = new ChessObscuroAgent({ rng: mulberry32(1000 + gi), ...knobs });
+      const agent = new ChessObscuroAgent({ rng: mulberry32(1000 + gi), ...knobs, ...agentOpts });
       let chosen = null;
       for (let i = 0; i <= ply; i++) {
         const pa = sess.log[i].playerActions[0];
@@ -283,7 +303,7 @@ async function worker() {
       const worlds = agent._carry.get(seat)?.tree?.worlds ?? [];
       let reachThreat = 0, reachAll = 0;
       for (const w of worlds) { reachAll += w.prob; if (threatened(w.node.state.board)) reachThreat += w.prob; }
-      parentPort.postMessage({ id, arm, gi, ply, seat, key, humanHung, hung, defend: total ? defend / total : 0, pmax: res?.pmax ?? null,
+      parentPort.postMessage({ id, arm, gi, ply, seat, key, humanHung, hung, defend: total ? defend / total : 0, pmax: res?.pmax ?? null, safe: res?.safe ?? null,
         beliefThreat, searchThreat: reachAll ? reachThreat / reachAll : 0, pSize: tracker.size || null,
         // Expected-score loss of the chosen move on the true board, points of %;
         // and what the best defence was worth, as an expected score in %.

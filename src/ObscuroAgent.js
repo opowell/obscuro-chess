@@ -36,6 +36,7 @@ import {
 } from './stockfish.js';
 import { param, ramp, settingsProvenance } from './config.js';
 import { FOG_VALUE_MODEL } from './fogValueModel.js';
+import { materialOf, fogWinProbabilityWith } from './fogFeatures.js';
 
 // Difficulty-dial (0-100, t = difficulty/100) endpoints for chess's own two
 // leaf evaluators (_leafEval's power-mode ladder rung, _proportionalPick's
@@ -103,9 +104,11 @@ export const ANALYSIS_DEFAULTS = {
 // The probabilities come from FOG_VALUE_MODEL (src/fogValueModel.js, fitted by
 // scripts/fit-fog-value.mjs on how 2,853 Chess.com fog games actually ended):
 // P(side to move wins) from the engine's expected score for it, the material on
-// the board and its colour. Stockfish's own win/draw/loss is a full-information
-// estimate: held out, it predicts fog results worse than a coin flip (log-loss
-// 1.007 against 0.693; the fog model 0.567). Under fog a position Stockfish calls
+// the board and the balance, and its colour (src/fogFeatures.js). Stockfish's
+// own win/draw/loss is a full-information estimate: held out, it predicts fog
+// results worse than a coin flip (log-loss 1.004 against 0.693; the fog model
+// 0.5554). What each side can SEE is deliberately not an input: it fits a little
+// better and plays worse (docs/PARAMETERS.md §2.1). Under fog a position Stockfish calls
 // lost is still won ~15% of the time and one it calls won only ~80% — the
 // opponent cannot see everything — while a capturable king loses for certain.
 // Valuing leaves by full-information WDL (2026-10-01/02) made the agent leave its
@@ -125,16 +128,11 @@ export const ANALYSIS_DEFAULTS = {
 // units people read (mate and a hung king are then ±MATE_CP, as multiPV encodes
 // mate), and 'wdl', Stockfish's full-information (wins − losses)/1000, to play
 // the previous value model against this one. Production never passes either.
+// Likewise `model` (agent option `fogModel`) swaps in another FOG_VALUE_MODEL,
+// to play a refit against the shipped one.
 const WIN = 1;
 const MATE_CP = 100000;
 const winValue = (scale) => (scale === 'cp' ? MATE_CP : WIN);
-
-// Material on the board, as the fog model counts it.
-function materialOf(board) {
-  let m = 0;
-  for (const sq of Object.keys(board ?? {})) { const p = board[sq]; if (p) m += MATERIAL[p.type] ?? 0; }
-  return m;
-}
 
 // The engine's expected score (win + half a draw) for the side a line is
 // scored for. `board` is the position the line is about, for the rare line
@@ -145,12 +143,8 @@ function expectedScore({ cp, wdl }, board) {
 
 // P(the side to move wins under fog), from the engine's expected score `e` for
 // it in position `board`. See FOG_VALUE_MODEL.
-function fogWinProbability(e, board, toMove) {
-  const { beta, clip } = FOG_VALUE_MODEL;
-  const x = Math.min(1 - clip, Math.max(clip, e));
-  const L = Math.log(x / (1 - x)), m = materialOf(board) / 78;
-  const z = beta[0] + beta[1] * L + beta[2] * L * m + beta[3] * m + beta[4] * (toMove === 'white' ? 1 : 0);
-  return 1 / (1 + Math.exp(-z));
+function fogWinProbability(e, board, toMove, model = FOG_VALUE_MODEL) {
+  return fogWinProbabilityWith(model, e, board, toMove);
 }
 
 /** The fog value of a position to the side to move: 2·P(it wins) − 1, from the
@@ -159,28 +153,34 @@ export function fogValue(e, board, toMove) { return 2 * fogWinProbability(e, boa
 
 // The value TO THE MOVER of a child position (the opponent to move there), from
 // the mover's expected score `eMover` in it.
-function childValue(eMover, childBoard, mover) {
-  return 1 - 2 * fogWinProbability(1 - eMover, childBoard, otherColor(mover));
+function childValue(eMover, childBoard, mover, model) {
+  return 1 - 2 * fogWinProbability(1 - eMover, childBoard, otherColor(mover), model);
 }
 
 // The three ways a child gets scored, each returning its value to the mover:
 //   a line from the PARENT's MultiPV (scored for the mover),
 //   the child's OWN line (scored for the opponent, who is to move there),
 //   a centipawn score for the mover from the static evaluator or the value net.
-function fromMoverLine(line, childBoard, mover, scale) {
+function fromMoverLine(line, childBoard, mover, scale, model) {
   if (scale === 'cp') return line.cp;
   const e = expectedScore(line, childBoard);
-  return scale === 'wdl' ? 2 * e - 1 : childValue(e, childBoard, mover);
+  return scale === 'wdl' ? 2 * e - 1 : childValue(e, childBoard, mover, model);
 }
-function fromChildLine(line, childBoard, mover, scale) {
+function fromChildLine(line, childBoard, mover, scale, model) {
   if (scale === 'cp') return -line.cp;
   const e = 1 - expectedScore(line, childBoard);
-  return scale === 'wdl' ? 2 * e - 1 : childValue(e, childBoard, mover);
+  return scale === 'wdl' ? 2 * e - 1 : childValue(e, childBoard, mover, model);
 }
-function fromMoverCp(cp, childBoard, mover, scale) {
+// And the parent position itself, from its best line (scored for the mover).
+function selfValue(line, board, mover, scale, model) {
+  if (scale === 'cp') return line.cp;
+  const e = expectedScore(line, board);
+  return scale === 'wdl' ? 2 * e - 1 : 2 * fogWinProbability(e, board, mover, model) - 1;
+}
+function fromMoverCp(cp, childBoard, mover, scale, model) {
   if (scale === 'cp') return cp;
   const e = (1 + approxUtility(cp, childBoard)) / 2;
-  return scale === 'wdl' ? 2 * e - 1 : childValue(e, childBoard, mover);
+  return scale === 'wdl' ? 2 * e - 1 : childValue(e, childBoard, mover, model);
 }
 
 // Stockfish 17's published win-rate model (uci.cpp, win_rate_params), for the
@@ -189,7 +189,6 @@ function fromMoverCp(cp, childBoard, mover, scale) {
 // MultiPV lines from the test fixtures it reproduces SF18's reported win and
 // loss rates to within 25‰ (mean 4‰). It is used only where the engine did not
 // answer, which is a handful of leaves per game.
-const MATERIAL = { pawn: 1, knight: 3, bishop: 3, rook: 5, queen: 9 };
 const WR_A = [-13.50030198, 40.92780883, -36.82753545, 386.83004070];
 const WR_B = [96.53354896, -165.79058388, 90.89679019, 49.29561889];
 function approxUtility(cp, board) {
@@ -286,7 +285,7 @@ function engineWouldRefuse(board, mover) {
 // capturable, and in this world (where everything is known) the mover then
 // takes it: a win for the mover, valued as one rather than guessed at by the
 // static evaluator.
-async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled, scale }) {
+async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled, scale, model }) {
   const them = otherColor(mover);
   const out = new Array(actions.length);
   const need = [];
@@ -326,7 +325,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
         priced.add(i);
         leafStats.engineLeaves++;
       } else if (pv?.length && typeof pv[0].cp === 'number') {
-        out[i] = fromChildLine(pv[0], cs.board, mover, scale);
+        out[i] = fromChildLine(pv[0], cs.board, mover, scale, model);
         priced.add(i);
         leafStats.engineLeaves++;
       }
@@ -335,7 +334,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     for (const i of need) {
       if (priced.has(i)) continue;
       leafStats.fallbackLeaves++;
-      out[i] = fromMoverCp(evaluate(childStates[i].board, mover), childStates[i].board, mover, scale);
+      out[i] = fromMoverCp(evaluate(childStates[i].board, mover), childStates[i].board, mover, scale, model);
     }
     leafStats.refusedNodes++;
     if (truncated) leafStats.truncated++;
@@ -373,7 +372,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
       engineOk = !truncated;
       for (const line of pv) {
         const a = uciToAction(line.move, actions);
-        if (a) { const i = actions.indexOf(a); if (i >= 0) valueByIdx.set(i, fromMoverLine(line, (childStates?.[i] ?? state).board, mover, scale)); }
+        if (a) { const i = actions.indexOf(a); if (i >= 0) valueByIdx.set(i, fromMoverLine(line, (childStates?.[i] ?? state).board, mover, scale, model)); }
       }
     }
     if (pv && pv.length && valueByIdx.size < need.length) leafStats.unmappedNodes++;
@@ -399,7 +398,7 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
         } catch { childPv = null; }
         if (truncated) break;
         if (Array.isArray(childPv) && childPv.length === 0) valueByIdx.set(i, winValue(scale)); // NO MOVES
-        else if (childPv?.length && typeof childPv[0].cp === 'number') valueByIdx.set(i, fromChildLine(childPv[0], cs.board, mover, scale));
+        else if (childPv?.length && typeof childPv[0].cp === 'number') valueByIdx.set(i, fromChildLine(childPv[0], cs.board, mover, scale, model));
       }
       if (truncated) engineOk = false;
     }
@@ -415,8 +414,14 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
     for (const i of need) {
       const fromEngine = valueByIdx.has(i);
       if (fromEngine) leafStats.engineLeaves++; else leafStats.fallbackLeaves++;
-      out[i] = fromEngine ? valueByIdx.get(i) : fromMoverCp(evaluate(childStates[i].board, mover), childStates[i].board, mover, scale);
+      out[i] = fromEngine ? valueByIdx.get(i) : fromMoverCp(evaluate(childStates[i].board, mover), childStates[i].board, mover, scale, model);
     }
+    // The position itself, to the mover: the engine's best line is its value of
+    // `state`, so this costs nothing extra. The generic search can use it as a
+    // fresh world's ṽ(h) (FRESH_ALT_VALUE = 'self'), and under fog values it is
+    // what is achieved from this position without being told it is this one —
+    // where the best child's value is what a player who knew it would get.
+    if (pv?.length && !truncated) out.self = selfValue(pv[0], state.board, mover, scale, model);
     leafStats.calls++;
     if (truncated) leafStats.truncated++;
   }
@@ -430,9 +435,9 @@ async function scoreChildren(state, mover, actions, childStates, { sfDepth, cols
 //
 // `scale: 'cp'` returns raw centipawns instead of values (see LEAF VALUES), for
 // a measurement yardstick; the search never passes it.
-export function makeChessLeafEval(sfDepth, cols, { isCancelled, scale } = {}) {
+export function makeChessLeafEval(sfDepth, cols, { isCancelled, scale, model } = {}) {
   return async (state, mover, actions, childStates) =>
-    (await scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled, scale })).scores;
+    (await scoreChildren(state, mover, actions, childStates, { sfDepth, cols, isCancelled, scale, model })).scores;
 }
 
 // THE DISTILLED EVALUATOR — same contract, no engine. `net` is a ValueNet
@@ -639,7 +644,7 @@ export class ChessObscuroAgent extends GenericObscuroAgent {
     const { sfDepth: sfDepthR, cols: colsR } = chessDial().leafEval;
     const sfDepth = this.opts.sfDepth ?? Math.max(1, ramp(sfDepthR, t));
     const cols = ramp(colsR, t);
-    return makeChessLeafEval(sfDepth, cols, { scale: this.opts.leafScale });
+    return makeChessLeafEval(sfDepth, cols, { scale: this.opts.leafScale, model: this.opts.fogModel });
   }
 
   async chooseAction(state, legalActions) {

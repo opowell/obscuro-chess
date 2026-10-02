@@ -58,13 +58,33 @@ expected result UNDER FOG, P(win) − P(loss) for the side the value is for, so
 every value is in [−1, +1]: a captured king is +1, a hung one −1, and a child
 where the opponent has no legal move in standard chess (a forced king loss under
 fog rules) is +1. P(win) comes from `FOG_VALUE_MODEL` (`src/fogValueModel.js`),
-a logistic model of the game's result given Stockfish's expected score, the
-material on the board and the colour to move, fitted by
-`scripts/fit-fog-value.mjs` on 174,246 positions from 2,853 Chess.com fog games.
-Held out by game it predicts results at log-loss 0.567 nats, against 1.007 for
+a logistic model of the game's result fitted by `scripts/fit-fog-value.mjs` on
+174,246 positions from 2,853 Chess.com fog games. Its inputs
+(`src/fogFeatures.js`): Stockfish's expected score (as a logit and as itself),
+the material on the board, the material balance and the colour to move. Held
+out by game it predicts results at log-loss 0.5554 nats, against 1.004 for
 Stockfish's own full-information expected score and 0.693 for a coin flip:
 under fog, positions Stockfish calls lost are still won ~15% of the time and
 ones it calls won only ~80%.
+
+What each input buys, held out and paired by game (`fit-fog-value.mjs` prints
+the table): material balance −0.011 nats (z = −8) — the engine's score
+saturates once a position is decided, and without it a bishop up and a bishop
+down looked the same (it played Bd7–b5, dropping the bishop, in the befd4820
+fixture once anything else tipped the scale). Against the model without it,
+seat-swapped at dial 30: 66.3% ± 4.3 over 60 pairs.
+
+Not in the model: the INFORMATION STATE, tested 2026-10-02 as a way to credit
+a move for what it reveals or hides past the search's horizon. The share of the
+opponent's pieces each side sees improves the fit a little more (−0.0009 nats,
+z = −2.3; squares seen helped only until balance was in, then turned negative —
+it had been standing in for material). In play it was worse: on 300 hidden king
+threats the king was left capturable 19.7% of the time against 15.0% (paired,
+24 probes against 10), and it scored 46.7% ± 4.6 over 60 seat-swapped pairs.
+The coefficient is observational — players who see more pieces are the ones
+attacking — while the search needs what LOOKING is worth, which this fit
+cannot separate. The model stays reproducible as `balseen` in
+`scripts/fit-fog-value.mjs` and `scripts/fog-model-arms.mjs`.
 
 History: centipawns clamped at `LEAF_CLAMP` = 1500 with a win worth
 `SEARCH_WIN` = 8000, hand-picked, until 2026-10-01; Stockfish's full-information
